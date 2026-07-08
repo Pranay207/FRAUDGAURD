@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 Action = Literal["ALLOW", "CHALLENGE", "BLOCK"]
 FeedbackLabel = Literal["CONFIRMED_FRAUD", "FALSE_POSITIVE", "SAFE"]
 CaseStatus = Literal["OPEN", "INVESTIGATING", "RESOLVED"]
+UserRole = Literal["admin", "analyst", "viewer", "service"]
+JobStatus = Literal["QUEUED", "RUNNING", "RETRYING", "SUCCEEDED", "FAILED"]
 
 
 class DeviceFingerprint(BaseModel):
@@ -116,6 +118,8 @@ class HealthResponse(BaseModel):
     status: str
     database: str
     tenant_seeded: bool
+    redis: str | None = None
+    worker_queue: str | None = None
 
 
 class TenantResponse(BaseModel):
@@ -123,6 +127,8 @@ class TenantResponse(BaseModel):
     name: str
     status: str
     key_name: str
+    actor_id: str | None = None
+    role: UserRole | None = None
 
 
 class CaseSummary(BaseModel):
@@ -204,8 +210,34 @@ class ModelVersionResponse(BaseModel):
     version_id: str
     artifact_path: str
     metrics: dict[str, float]
+    stage: str = "candidate"
+    is_active: bool = False
+    training_job_id: str | None = None
+    promoted_at: datetime | None = None
     created_at: datetime
 
+
+class ModelActivationRequest(BaseModel):
+    stage: str = "production"
+
+
+class ModelActivationResponse(BaseModel):
+    model_name: str
+    version_id: str
+    stage: str
+    is_active: bool
+    promoted_at: datetime
+
+
+class ModelEvaluationRecord(BaseModel):
+    version_id: str
+    artifact_path: str
+    metrics: dict[str, float]
+
+
+class ModelEvaluationSummaryResponse(BaseModel):
+    generated_at: datetime
+    models: dict[str, ModelEvaluationRecord]
 
 class DatasetStatusResponse(BaseModel):
     dataset_name: str
@@ -228,6 +260,35 @@ class TrainModelsResponse(BaseModel):
     status: str
     artifacts: dict[str, str]
     metrics: dict[str, dict[str, float]]
+
+
+class BulkItemFailure(BaseModel):
+    index: int
+    error: str
+
+
+class BulkScoreResponse(BaseModel):
+    route: str
+    accepted: int
+    rejected: int
+    results: list[ScoreResponse]
+    failures: list[BulkItemFailure]
+
+
+class SessionBatchRequest(BaseModel):
+    events: list[SessionScoreRequest] = Field(min_length=1, max_length=1000)
+
+
+class TransactionBatchRequest(BaseModel):
+    events: list[TransactionScoreRequest] = Field(min_length=1, max_length=1000)
+
+
+class OnboardBatchRequest(BaseModel):
+    events: list[OnboardRequest] = Field(min_length=1, max_length=1000)
+
+
+class PhishingBatchRequest(BaseModel):
+    events: list[PhishingScoreRequest] = Field(min_length=1, max_length=1000)
 
 
 class ApiKeyCreateRequest(BaseModel):
@@ -267,10 +328,133 @@ class WebhookDeliveryResponse(BaseModel):
     request_id: str
     status: str
     attempted_at: datetime
+    retry_count: int = 0
+    max_attempts: int = 3
+    next_attempt_at: datetime | None = None
+    last_http_status: int | None = None
     error_message: str | None = None
 
 
 class WebhookDispatchResponse(BaseModel):
     dispatched: int
     failed: int
+    retried: int = 0
+    dead_lettered: int = 0
     queued_remaining: int
+
+
+class AuthBootstrapRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=12)
+    full_name: str = Field(min_length=2)
+
+
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AnalystCreateRequest(BaseModel):
+    email: str
+    password: str = Field(min_length=12)
+    full_name: str = Field(min_length=2)
+    role: Literal["admin", "analyst", "viewer"]
+
+
+class AnalystUserResponse(BaseModel):
+    analyst_id: str
+    email: str
+    full_name: str
+    role: Literal["admin", "analyst", "viewer"]
+    is_active: bool
+    created_at: datetime
+    last_login_at: datetime | None = None
+
+
+class AuthTokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in_seconds: int
+    tenant_id: str
+    role: Literal["admin", "analyst", "viewer"]
+    analyst: AnalystUserResponse
+
+
+class CurrentUserResponse(BaseModel):
+    tenant_id: str
+    tenant_name: str
+    actor_id: str
+    actor_type: str
+    role: UserRole
+    email: str | None = None
+    key_name: str
+    auth_method: str
+
+
+class JobResponse(BaseModel):
+    job_id: str
+    job_type: str
+    status: JobStatus
+    payload: dict
+    result: dict | None = None
+    priority: int
+    attempts: int
+    max_attempts: int
+    run_after: datetime
+    created_by: str | None = None
+    error_message: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+
+class RetrainRequest(BaseModel):
+    promote_stage: str = "candidate"
+    activate_after_training: bool = False
+
+
+class ConnectorCreateRequest(BaseModel):
+    connector_type: Literal["file_drop"] = "file_drop"
+    route: Literal["session", "onboard", "transaction", "phishing"]
+    source_path: str
+    config: dict = Field(default_factory=dict)
+
+
+class ConnectorResponse(BaseModel):
+    connector_id: str
+    connector_type: str
+    route: str
+    source_path: str
+    config: dict
+    is_active: bool
+    created_by: str | None = None
+    created_at: datetime
+    last_run_at: datetime | None = None
+
+
+class ConnectorRunResponse(BaseModel):
+    connector_id: str
+    job_id: str
+    status: str
+
+
+class MonitoringSnapshotResponse(BaseModel):
+    generated_at: datetime
+    queued_jobs: int
+    running_jobs: int
+    failed_jobs: int
+    dead_letter_webhooks: int
+    queued_webhooks: int
+    api_keys_active: int
+    analysts_active: int
+    model_versions: int
+
+
+class SecurityAuditEventResponse(BaseModel):
+    event_id: str
+    event_type: str
+    actor_id: str | None = None
+    actor_role: str | None = None
+    details: dict
+    created_at: datetime
+

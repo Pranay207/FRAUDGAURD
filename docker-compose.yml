@@ -1,19 +1,48 @@
-version: "3.9"
+﻿version: "3.9"
 
 services:
-  api:
+  migrate:
     build: ./backend
-    ports:
-      - "8000:8000"
-    environment:
-      FRAUDGUARD_API_KEY: test_key
-      FRAUDGUARD_AUDIT_LOG_PATH: /app/data/audit_logs.jsonl
-      FRAUDGUARD_DATABASE_URL: postgresql://fg:fg@postgres:5432/fraudguard
+    command: ["python", "scripts/migrate.py"]
+    env_file:
+      - ./backend/.env.example
     volumes:
       - ./backend/data:/app/data
     depends_on:
-      - postgres
-      - redis
+      postgres:
+        condition: service_healthy
+
+  api:
+    build: ./backend
+    command: ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    env_file:
+      - ./backend/.env.example
+    volumes:
+      - ./backend/data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  worker:
+    build: ./backend
+    command: ["python", "scripts/run_worker.py"]
+    env_file:
+      - ./backend/.env.example
+    volumes:
+      - ./backend/data:/app/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
 
   postgres:
     image: postgres:16
@@ -25,11 +54,21 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fg -d fraudguard"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
 volumes:
   pgdata:

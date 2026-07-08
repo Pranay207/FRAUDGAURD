@@ -1,0 +1,20 @@
+[
+  {
+    "user_id": "real-user-1",
+    "session_id": "sess-real-1",
+    "device_id": "device-real-1",
+    "keystroke_mean_ms": 142,
+    "session_duration_s": 88,
+    "hour_of_day": 11,
+    "ip_country": "IN"
+  },
+  {
+    "user_id": "real-user-2",
+    "session_id": "sess-real-2",
+    "device_id": "device-shared-1",
+    "keystroke_mean_ms": 280,
+    "session_duration_s": 16,
+    "hour_of_day": 2,
+    "ip_country": "AE"
+  }
+]

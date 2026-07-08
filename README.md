@@ -193,3 +193,63 @@ FraudGuard is a strong local MVP and engineering foundation. It is functional en
 - add RBAC and analyst authentication
 - add production deployment, observability, and secret management
 - expand training and evaluation with larger labeled datasets and reporting
+
+## Real Event Ingestion
+
+To test FraudGuard with real event files instead of seeded demo data, use the new batch ingestion endpoints and importer script.
+
+### Bulk ingestion endpoints
+
+- `POST /v1/ingest/session`
+- `POST /v1/ingest/onboard`
+- `POST /v1/ingest/transaction`
+- `POST /v1/ingest/phishing`
+
+Each endpoint accepts a payload like:
+
+```json
+{
+  "events": [ ... ]
+}
+```
+
+and returns:
+
+- accepted item count
+- rejected item count
+- per-event scoring results
+- per-item failures when an event cannot be processed
+
+### Import real event files
+
+Example command pattern:
+
+```powershell
+cd C:\Users\Shiva\Downloads\FraudGaurd\backend
+.\.venv\Scripts\python.exe scripts\import_events.py http://127.0.0.1:8000 test_key transaction scripts\examples\transaction_events.sample.json
+```
+
+Supported route values:
+
+- `session`
+- `onboard`
+- `transaction`
+- `phishing`
+
+### Example files included
+
+- `backend/scripts/examples/session_events.sample.json`
+- `backend/scripts/examples/onboard_events.sample.json`
+- `backend/scripts/examples/transaction_events.sample.json`
+- `backend/scripts/examples/phishing_events.sample.json`
+
+### Recommended real testing flow
+
+1. Start the API.
+2. Import onboarding events.
+3. Import session events.
+4. Import transaction events.
+5. Import phishing events.
+6. Open the dashboard and inspect the generated cases.
+7. Use graph lookups on the imported entities.
+8. Review [MODEL_EVALUATION_SUMMARY.json](/C:/Users/Shiva/Downloads/FraudGaurd/MODEL_EVALUATION_SUMMARY.json).

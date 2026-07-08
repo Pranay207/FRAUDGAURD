@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import hashlib
 import json
@@ -338,25 +338,44 @@ class FraudRepository:
         with get_connection() as connection:
             endpoints = connection.execute("SELECT webhook_id FROM webhook_endpoints WHERE tenant_id = ? AND event_type = ? AND is_active = 1", (tenant_id, event_type)).fetchall()
             for endpoint in endpoints:
-                connection.execute("INSERT INTO webhook_deliveries (tenant_id, delivery_id, webhook_id, event_type, request_id, status, payload_json, attempted_at, error_message) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, NULL)", (tenant_id, str(uuid4()), endpoint["webhook_id"], event_type, request_id, json.dumps(payload), attempted_at))
+                connection.execute(
+                    "INSERT INTO webhook_deliveries (tenant_id, delivery_id, webhook_id, event_type, request_id, status, payload_json, attempted_at, retry_count, max_attempts, next_attempt_at, last_http_status, error_message) VALUES (?, ?, ?, ?, ?, 'QUEUED', ?, ?, 0, 3, ?, NULL, NULL)",
+                    (tenant_id, str(uuid4()), endpoint["webhook_id"], event_type, request_id, json.dumps(payload), attempted_at, attempted_at),
+                )
             connection.commit()
 
     def list_webhook_deliveries(self, tenant_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with get_connection() as connection:
             rows = connection.execute("SELECT * FROM webhook_deliveries WHERE tenant_id = ? ORDER BY attempted_at DESC LIMIT ?", (tenant_id, limit)).fetchall()
-        return [{"delivery_id": row["delivery_id"], "webhook_id": row["webhook_id"], "event_type": row["event_type"], "request_id": row["request_id"], "status": row["status"], "attempted_at": datetime.fromisoformat(row["attempted_at"]), "error_message": row["error_message"]} for row in rows]
+        return [
+            {
+                "delivery_id": row["delivery_id"],
+                "webhook_id": row["webhook_id"],
+                "event_type": row["event_type"],
+                "request_id": row["request_id"],
+                "status": row["status"],
+                "attempted_at": datetime.fromisoformat(row["attempted_at"]),
+                "retry_count": int(row["retry_count"] or 0),
+                "max_attempts": int(row["max_attempts"] or 3),
+                "next_attempt_at": datetime.fromisoformat(row["next_attempt_at"]) if row["next_attempt_at"] else None,
+                "last_http_status": row["last_http_status"],
+                "error_message": row["error_message"],
+            }
+            for row in rows
+        ]
 
     def list_queued_webhook_deliveries(self, tenant_id: str, limit: int = 25) -> list[dict[str, Any]]:
+        now = datetime.now(UTC).isoformat()
         with get_connection() as connection:
             rows = connection.execute(
                 """
                 SELECT d.*, e.url, e.secret
                 FROM webhook_deliveries d
                 JOIN webhook_endpoints e ON e.tenant_id = d.tenant_id AND e.webhook_id = d.webhook_id
-                WHERE d.tenant_id = ? AND d.status = 'QUEUED' AND e.is_active = 1
-                ORDER BY d.attempted_at ASC LIMIT ?
+                WHERE d.tenant_id = ? AND d.status = 'QUEUED' AND e.is_active = 1 AND COALESCE(d.next_attempt_at, d.attempted_at) <= ?
+                ORDER BY COALESCE(d.next_attempt_at, d.attempted_at) ASC LIMIT ?
                 """,
-                (tenant_id, limit),
+                (tenant_id, now, limit),
             ).fetchall()
         return [dict(row) for row in rows]
 
@@ -365,6 +384,40 @@ class FraudRepository:
         with get_connection() as connection:
             connection.execute("UPDATE webhook_deliveries SET status = ?, attempted_at = ?, error_message = ? WHERE tenant_id = ? AND delivery_id = ?", (status, attempted_at, error_message, tenant_id, delivery_id))
             connection.commit()
+
+    def mark_webhook_delivery_success(self, tenant_id: str, delivery_id: str, http_status: int) -> None:
+        attempted_at = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE webhook_deliveries SET status = 'DELIVERED', attempted_at = ?, next_attempt_at = NULL, last_http_status = ?, error_message = NULL WHERE tenant_id = ? AND delivery_id = ?",
+                (attempted_at, http_status, tenant_id, delivery_id),
+            )
+            connection.commit()
+
+    def mark_webhook_delivery_failure(self, tenant_id: str, delivery_id: str, error_message: str, http_status: int | None = None) -> dict[str, Any] | None:
+        attempted_at_dt = datetime.now(UTC)
+        attempted_at = attempted_at_dt.isoformat()
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT retry_count, max_attempts FROM webhook_deliveries WHERE tenant_id = ? AND delivery_id = ?",
+                (tenant_id, delivery_id),
+            ).fetchone()
+            if row is None:
+                return None
+            retry_count = int(row["retry_count"] or 0) + 1
+            max_attempts = int(row["max_attempts"] or 3)
+            if retry_count >= max_attempts:
+                status = 'DEAD_LETTER'
+                next_attempt_at = None
+            else:
+                status = 'QUEUED'
+                next_attempt_at = (attempted_at_dt + timedelta(minutes=2 ** retry_count)).isoformat()
+            connection.execute(
+                "UPDATE webhook_deliveries SET status = ?, attempted_at = ?, retry_count = ?, next_attempt_at = ?, last_http_status = ?, error_message = ? WHERE tenant_id = ? AND delivery_id = ?",
+                (status, attempted_at, retry_count, next_attempt_at, http_status, error_message[:500], tenant_id, delivery_id),
+            )
+            connection.commit()
+        return {"status": status, "retry_count": retry_count, "max_attempts": max_attempts}
 
     def get_tenant(self, tenant_id: str, key_name: str) -> dict[str, Any]:
         with get_connection() as connection:
@@ -386,19 +439,59 @@ class FraudRepository:
             rows = connection.execute("SELECT key_name, key_hash, is_active, created_at, last_used_at FROM api_keys WHERE tenant_id = ? ORDER BY created_at DESC", (tenant_id,)).fetchall()
         return [{"key_name": row["key_name"], "key_prefix": row["key_hash"][:12], "is_active": bool(row["is_active"]), "created_at": datetime.fromisoformat(row["created_at"]), "last_used_at": datetime.fromisoformat(row["last_used_at"]) if row["last_used_at"] else None} for row in rows]
 
-    def save_model_version(self, tenant_id: str, model_name: str, version_id: str, artifact_path: str, metrics: dict[str, float]) -> None:
+    def save_model_version(self, tenant_id: str, model_name: str, version_id: str, artifact_path: str, metrics: dict[str, float], stage: str = "candidate", is_active: bool = False, training_job_id: str | None = None) -> None:
         now = datetime.now(UTC).isoformat()
+        promoted_at = now if is_active else None
         with get_connection() as connection:
+            if is_active:
+                connection.execute("UPDATE model_versions SET is_active = 0 WHERE tenant_id = ? AND model_name = ?", (tenant_id, model_name))
             connection.execute(
-                "INSERT INTO model_versions (tenant_id, model_name, version_id, artifact_path, metrics_json, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                (tenant_id, model_name, version_id, artifact_path, json.dumps(metrics), now),
+                "INSERT INTO model_versions (tenant_id, model_name, version_id, artifact_path, metrics_json, stage, is_active, training_job_id, promoted_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, model_name, version_id, artifact_path, json.dumps(metrics), stage, int(is_active), training_job_id, promoted_at, now),
             )
             connection.commit()
+
+    def activate_model_version(self, tenant_id: str, model_name: str, version_id: str, stage: str = "production") -> dict[str, Any] | None:
+        promoted_at = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT tenant_id, model_name, version_id FROM model_versions WHERE tenant_id = ? AND model_name = ? AND version_id = ?",
+                (tenant_id, model_name, version_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute("UPDATE model_versions SET is_active = 0 WHERE tenant_id = ? AND model_name = ?", (tenant_id, model_name))
+            connection.execute(
+                "UPDATE model_versions SET is_active = 1, stage = ?, promoted_at = ? WHERE tenant_id = ? AND model_name = ? AND version_id = ?",
+                (stage, promoted_at, tenant_id, model_name, version_id),
+            )
+            connection.commit()
+        return {"model_name": model_name, "version_id": version_id, "stage": stage, "is_active": True, "promoted_at": datetime.fromisoformat(promoted_at)}
+
+    def get_active_model_version(self, tenant_id: str, model_name: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT model_name, version_id, artifact_path, metrics_json, stage, is_active, training_job_id, promoted_at, created_at FROM model_versions WHERE tenant_id = ? AND model_name = ? AND is_active = 1 ORDER BY promoted_at DESC, created_at DESC LIMIT 1",
+                (tenant_id, model_name),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "model_name": row["model_name"],
+            "version_id": row["version_id"],
+            "artifact_path": row["artifact_path"],
+            "metrics": json.loads(row["metrics_json"]),
+            "stage": row["stage"],
+            "is_active": bool(row["is_active"]),
+            "training_job_id": row["training_job_id"],
+            "promoted_at": datetime.fromisoformat(row["promoted_at"]) if row["promoted_at"] else None,
+            "created_at": datetime.fromisoformat(row["created_at"]),
+        }
 
     def list_model_versions(self, tenant_id: str, limit: int = 20) -> list[dict[str, Any]]:
         with get_connection() as connection:
             rows = connection.execute(
-                "SELECT model_name, version_id, artifact_path, metrics_json, created_at FROM model_versions WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
+                "SELECT model_name, version_id, artifact_path, metrics_json, stage, is_active, training_job_id, promoted_at, created_at FROM model_versions WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
                 (tenant_id, limit),
             ).fetchall()
         return [
@@ -407,11 +500,252 @@ class FraudRepository:
                 "version_id": row["version_id"],
                 "artifact_path": row["artifact_path"],
                 "metrics": json.loads(row["metrics_json"]),
+                "stage": row["stage"],
+                "is_active": bool(row["is_active"]),
+                "training_job_id": row["training_job_id"],
+                "promoted_at": datetime.fromisoformat(row["promoted_at"]) if row["promoted_at"] else None,
                 "created_at": datetime.fromisoformat(row["created_at"]),
             }
             for row in rows
         ]
 
+    def count_analyst_users(self, tenant_id: str) -> int:
+        with get_connection() as connection:
+            row = connection.execute("SELECT COUNT(*) AS count FROM analyst_users WHERE tenant_id = ?", (tenant_id,)).fetchone()
+        return int(row["count"])
+
+    def create_analyst_user(self, tenant_id: str, email: str, full_name: str, role: str, password_hash: str, password_salt: str, created_by: str | None) -> dict[str, Any]:
+        analyst_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "INSERT INTO analyst_users (tenant_id, analyst_id, email, full_name, role, password_hash, password_salt, is_active, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (tenant_id, analyst_id, email.lower(), full_name, role, password_hash, password_salt, created_by, now),
+            )
+            connection.commit()
+        return {"analyst_id": analyst_id, "email": email.lower(), "full_name": full_name, "role": role, "is_active": True, "created_at": datetime.fromisoformat(now), "last_login_at": None}
+
+    def get_analyst_by_email(self, tenant_id: str, email: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM analyst_users WHERE tenant_id = ? AND email = ?",
+                (tenant_id, email.lower()),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_analyst_users(self, tenant_id: str) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT analyst_id, email, full_name, role, is_active, created_at, last_login_at FROM analyst_users WHERE tenant_id = ? ORDER BY created_at DESC",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {
+                "analyst_id": row["analyst_id"],
+                "email": row["email"],
+                "full_name": row["full_name"],
+                "role": row["role"],
+                "is_active": bool(row["is_active"]),
+                "created_at": datetime.fromisoformat(row["created_at"]),
+                "last_login_at": datetime.fromisoformat(row["last_login_at"]) if row["last_login_at"] else None,
+            }
+            for row in rows
+        ]
+
+    def touch_analyst_login(self, tenant_id: str, analyst_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE analyst_users SET last_login_at = ? WHERE tenant_id = ? AND analyst_id = ?",
+                (now, tenant_id, analyst_id),
+            )
+            connection.commit()
+
+    def write_security_audit_event(self, tenant_id: str, event_type: str, actor_id: str | None, actor_role: str | None, details: dict[str, Any]) -> dict[str, Any]:
+        event_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "INSERT INTO security_audit_events (tenant_id, event_id, event_type, actor_id, actor_role, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, event_id, event_type, actor_id, actor_role, json.dumps(details), now),
+            )
+            connection.commit()
+        return {"event_id": event_id, "event_type": event_type, "actor_id": actor_id, "actor_role": actor_role, "details": details, "created_at": datetime.fromisoformat(now)}
+
+    def list_security_audit_events(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT event_id, event_type, actor_id, actor_role, details_json, created_at FROM security_audit_events WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
+                (tenant_id, limit),
+            ).fetchall()
+        return [
+            {
+                "event_id": row["event_id"],
+                "event_type": row["event_type"],
+                "actor_id": row["actor_id"],
+                "actor_role": row["actor_role"],
+                "details": json.loads(row["details_json"]),
+                "created_at": datetime.fromisoformat(row["created_at"]),
+            }
+            for row in rows
+        ]
+
+    def enqueue_job(self, tenant_id: str, job_type: str, payload: dict[str, Any], created_by: str | None, priority: int = 100, max_attempts: int = 3, run_after: datetime | None = None) -> dict[str, Any]:
+        job_id = str(uuid4())
+        now_dt = datetime.now(UTC)
+        run_after_dt = run_after or now_dt
+        with get_connection() as connection:
+            connection.execute(
+                "INSERT INTO jobs (tenant_id, job_id, job_type, status, payload_json, priority, attempts, max_attempts, run_after, created_by, created_at) VALUES (?, ?, ?, 'QUEUED', ?, ?, 0, ?, ?, ?, ?)",
+                (tenant_id, job_id, job_type, json.dumps(payload), priority, max_attempts, run_after_dt.isoformat(), created_by, now_dt.isoformat()),
+            )
+            connection.commit()
+        return {"job_id": job_id, "job_type": job_type, "status": "QUEUED", "payload": payload, "result": None, "priority": priority, "attempts": 0, "max_attempts": max_attempts, "run_after": run_after_dt, "created_by": created_by, "error_message": None, "created_at": now_dt, "started_at": None, "completed_at": None}
+
+    def list_jobs(self, tenant_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT job_id, job_type, status, payload_json, result_json, priority, attempts, max_attempts, run_after, created_by, error_message, created_at, started_at, completed_at FROM jobs WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
+                (tenant_id, limit),
+            ).fetchall()
+        return [
+            {
+                "job_id": row["job_id"],
+                "job_type": row["job_type"],
+                "status": row["status"],
+                "payload": json.loads(row["payload_json"]),
+                "result": json.loads(row["result_json"]) if row["result_json"] else None,
+                "priority": int(row["priority"]),
+                "attempts": int(row["attempts"]),
+                "max_attempts": int(row["max_attempts"]),
+                "run_after": datetime.fromisoformat(row["run_after"]),
+                "created_by": row["created_by"],
+                "error_message": row["error_message"],
+                "created_at": datetime.fromisoformat(row["created_at"]),
+                "started_at": datetime.fromisoformat(row["started_at"]) if row["started_at"] else None,
+                "completed_at": datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
+            }
+            for row in rows
+        ]
+
+    def claim_jobs(self, worker_id: str, limit: int = 10, lease_seconds: int = 300) -> list[dict[str, Any]]:
+        now_dt = datetime.now(UTC)
+        now = now_dt.isoformat()
+        lease_expires = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+        claimed: list[dict[str, Any]] = []
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT tenant_id, job_id, job_type, payload_json, priority, attempts, max_attempts, created_by, created_at FROM jobs WHERE status IN ('QUEUED', 'RETRYING') AND run_after <= ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?) ORDER BY priority DESC, created_at ASC LIMIT ?",
+                (now, now, limit),
+            ).fetchall()
+            for row in rows:
+                connection.execute(
+                    "UPDATE jobs SET status = 'RUNNING', attempts = attempts + 1, started_at = COALESCE(started_at, ?), lease_expires_at = ?, error_message = NULL WHERE tenant_id = ? AND job_id = ?",
+                    (now, lease_expires, row["tenant_id"], row["job_id"]),
+                )
+                claimed.append({
+                    "tenant_id": row["tenant_id"],
+                    "job_id": row["job_id"],
+                    "job_type": row["job_type"],
+                    "payload": json.loads(row["payload_json"]),
+                    "priority": int(row["priority"]),
+                    "attempts": int(row["attempts"]) + 1,
+                    "max_attempts": int(row["max_attempts"]),
+                    "created_by": row["created_by"],
+                    "created_at": row["created_at"],
+                    "worker_id": worker_id,
+                })
+            connection.commit()
+        return claimed
+
+    def complete_job(self, tenant_id: str, job_id: str, result: dict[str, Any]) -> None:
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE jobs SET status = 'SUCCEEDED', result_json = ?, completed_at = ?, lease_expires_at = NULL, error_message = NULL WHERE tenant_id = ? AND job_id = ?",
+                (json.dumps(result), now, tenant_id, job_id),
+            )
+            connection.commit()
+
+    def fail_job(self, tenant_id: str, job_id: str, error_message: str, retry_delay_seconds: int = 60) -> dict[str, Any] | None:
+        now_dt = datetime.now(UTC)
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT attempts, max_attempts FROM jobs WHERE tenant_id = ? AND job_id = ?",
+                (tenant_id, job_id),
+            ).fetchone()
+            if row is None:
+                return None
+            attempts = int(row["attempts"])
+            max_attempts = int(row["max_attempts"])
+            if attempts >= max_attempts:
+                status = 'FAILED'
+                completed_at = now_dt.isoformat()
+                run_after = now_dt.isoformat()
+            else:
+                status = 'RETRYING'
+                completed_at = None
+                run_after = (now_dt + timedelta(seconds=retry_delay_seconds)).isoformat()
+            connection.execute(
+                "UPDATE jobs SET status = ?, run_after = ?, completed_at = ?, lease_expires_at = NULL, error_message = ? WHERE tenant_id = ? AND job_id = ?",
+                (status, run_after, completed_at, error_message[:500], tenant_id, job_id),
+            )
+            connection.commit()
+        return {"status": status, "attempts": attempts, "max_attempts": max_attempts}
+
+    def monitoring_snapshot(self, tenant_id: str) -> dict[str, Any]:
+        with get_connection() as connection:
+            queued_jobs = connection.execute("SELECT COUNT(*) AS count FROM jobs WHERE tenant_id = ? AND status IN ('QUEUED', 'RETRYING')", (tenant_id,)).fetchone()["count"]
+            running_jobs = connection.execute("SELECT COUNT(*) AS count FROM jobs WHERE tenant_id = ? AND status = 'RUNNING'", (tenant_id,)).fetchone()["count"]
+            failed_jobs = connection.execute("SELECT COUNT(*) AS count FROM jobs WHERE tenant_id = ? AND status = 'FAILED'", (tenant_id,)).fetchone()["count"]
+            dead_letter_webhooks = connection.execute("SELECT COUNT(*) AS count FROM webhook_deliveries WHERE tenant_id = ? AND status = 'DEAD_LETTER'", (tenant_id,)).fetchone()["count"]
+            queued_webhooks = connection.execute("SELECT COUNT(*) AS count FROM webhook_deliveries WHERE tenant_id = ? AND status = 'QUEUED'", (tenant_id,)).fetchone()["count"]
+            api_keys_active = connection.execute("SELECT COUNT(*) AS count FROM api_keys WHERE tenant_id = ? AND is_active = 1", (tenant_id,)).fetchone()["count"]
+            analysts_active = connection.execute("SELECT COUNT(*) AS count FROM analyst_users WHERE tenant_id = ? AND is_active = 1", (tenant_id,)).fetchone()["count"]
+            model_versions = connection.execute("SELECT COUNT(*) AS count FROM model_versions WHERE tenant_id = ?", (tenant_id,)).fetchone()["count"]
+        now = datetime.now(UTC)
+        return {"generated_at": now, "queued_jobs": int(queued_jobs), "running_jobs": int(running_jobs), "failed_jobs": int(failed_jobs), "dead_letter_webhooks": int(dead_letter_webhooks), "queued_webhooks": int(queued_webhooks), "api_keys_active": int(api_keys_active), "analysts_active": int(analysts_active), "model_versions": int(model_versions)}
+
+    def create_connector_config(self, tenant_id: str, connector_type: str, route: str, source_path: str, config: dict[str, Any], created_by: str | None) -> dict[str, Any]:
+        connector_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "INSERT INTO connector_configs (tenant_id, connector_id, connector_type, route, source_path, config_json, is_active, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                (tenant_id, connector_id, connector_type, route, source_path, json.dumps(config), created_by, now),
+            )
+            connection.commit()
+        return {"connector_id": connector_id, "connector_type": connector_type, "route": route, "source_path": source_path, "config": config, "is_active": True, "created_by": created_by, "created_at": datetime.fromisoformat(now), "last_run_at": None}
+
+    def list_connector_configs(self, tenant_id: str) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT connector_id, connector_type, route, source_path, config_json, is_active, created_by, created_at, last_run_at FROM connector_configs WHERE tenant_id = ? ORDER BY created_at DESC",
+                (tenant_id,),
+            ).fetchall()
+        return [
+            {"connector_id": row["connector_id"], "connector_type": row["connector_type"], "route": row["route"], "source_path": row["source_path"], "config": json.loads(row["config_json"]), "is_active": bool(row["is_active"]), "created_by": row["created_by"], "created_at": datetime.fromisoformat(row["created_at"]), "last_run_at": datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None}
+            for row in rows
+        ]
+
+    def get_connector_config(self, tenant_id: str, connector_id: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT connector_id, connector_type, route, source_path, config_json, is_active, created_by, created_at, last_run_at FROM connector_configs WHERE tenant_id = ? AND connector_id = ?",
+                (tenant_id, connector_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {"connector_id": row["connector_id"], "connector_type": row["connector_type"], "route": row["route"], "source_path": row["source_path"], "config": json.loads(row["config_json"]), "is_active": bool(row["is_active"]), "created_by": row["created_by"], "created_at": datetime.fromisoformat(row["created_at"]), "last_run_at": datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None}
+
+    def mark_connector_run(self, tenant_id: str, connector_id: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "UPDATE connector_configs SET last_run_at = ? WHERE tenant_id = ? AND connector_id = ?",
+                (now, tenant_id, connector_id),
+            )
+            connection.commit()
     def _audit_row_to_dict(self, row: Any) -> dict[str, Any]:
         return {
             "request_id": row["request_id"],
@@ -431,3 +765,8 @@ class FraudRepository:
 
 
 repository = FraudRepository()
+
+
+
+
+

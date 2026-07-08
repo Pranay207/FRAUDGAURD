@@ -1,0 +1,32 @@
+[
+  {
+    "user_id": "real-onboard-1",
+    "pan_hash": "1111111111111111111111111111111111111111111111111111111111111111",
+    "phone_hash": "2222222222222222222222222222222222222222222222222222222222222222",
+    "aadhaar_last4": "1234",
+    "device": {
+      "device_id": "device-shared-1",
+      "os": "Android",
+      "screen_res": "1080x2400",
+      "is_rooted": false,
+      "sim_count": 1
+    },
+    "selfie_check_score": 0.12,
+    "kyc_name_match_score": 0.97
+  },
+  {
+    "user_id": "real-onboard-2",
+    "pan_hash": "3333333333333333333333333333333333333333333333333333333333333333",
+    "phone_hash": "4444444444444444444444444444444444444444444444444444444444444444",
+    "aadhaar_last4": "5678",
+    "device": {
+      "device_id": "device-shared-1",
+      "os": "Android",
+      "screen_res": "1080x2400",
+      "is_rooted": true,
+      "sim_count": 3
+    },
+    "selfie_check_score": 0.84,
+    "kyc_name_match_score": 0.54
+  }
+]

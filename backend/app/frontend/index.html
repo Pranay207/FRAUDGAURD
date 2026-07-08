@@ -1,4 +1,4 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -7,55 +7,292 @@
     <link rel="stylesheet" href="/dashboard/assets/styles.css" />
   </head>
   <body>
-    <div class="shell">
+    <div class="app-shell">
       <aside class="sidebar">
-        <div>
+        <div class="sidebar-top">
           <p class="eyebrow">FraudGuard</p>
-          <h1>Risk Console</h1>
-          <p class="lede">Real-time fraud triage for onboarding, sessions, payments, phishing review, and graph-linked entity risk.</p>
+          <h1>Operations Console</h1>
+          <p class="lede">A single analyst surface for fraud queues, model operations, delivery reliability, retraining jobs, and connector ingestion.</p>
+
           <div class="tenant-card">
             <div class="muted">Tenant</div>
-            <strong id="tenantName">Loading...</strong>
-            <div class="case-meta" id="tenantMeta"></div>
+            <strong id="tenantName">Not connected</strong>
+            <div class="case-meta" id="tenantMeta">Authenticate to load console state</div>
+          </div>
+
+          <div class="status-stack">
+            <div class="status-pill"><span>Auth</span><strong id="authState">Disconnected</strong></div>
+            <div class="status-pill"><span>Role</span><strong id="roleState">Unknown</strong></div>
+            <div class="status-pill"><span>API health</span><strong id="healthState">Unknown</strong></div>
           </div>
         </div>
+
         <div class="auth-card">
-          <label for="apiKey">API key</label>
-          <input id="apiKey" value="test_key" />
-          <button id="connectBtn">Load Console</button>
-          <button id="seedBtn" class="ghost">Seed Demo Data</button>
-          <button id="dispatchBtn" class="ghost">Dispatch Webhooks</button>
+          <div class="section-head compact">
+            <h2>Access</h2>
+          </div>
+          <label for="authMode">Mode</label>
+          <select id="authMode">
+            <option value="api_key">Service API key</option>
+            <option value="analyst">Analyst login</option>
+          </select>
+
+          <div id="apiKeyFields" class="auth-fields">
+            <label for="apiKey">API key</label>
+            <input id="apiKey" value="test_key" />
+          </div>
+
+          <div id="analystFields" class="auth-fields hidden">
+            <label for="tenantId">Tenant ID</label>
+            <input id="tenantId" value="demo-tenant" />
+            <label for="analystEmail">Email</label>
+            <input id="analystEmail" placeholder="admin@fraudguard.local" />
+            <label for="analystPassword">Password</label>
+            <input id="analystPassword" type="password" placeholder="StrongPass!234" />
+          </div>
+
+          <div class="button-row">
+            <button id="connectBtn">Connect</button>
+            <button id="bootstrapBtn" class="ghost">Bootstrap Admin</button>
+          </div>
+
+          <div class="button-row">
+            <button id="seedBtn" class="ghost">Seed Demo</button>
+            <button id="dispatchBtn" class="ghost">Dispatch Webhooks</button>
+          </div>
+
+          <div class="button-row">
+            <button id="refreshBtn" class="ghost">Refresh</button>
+            <button id="autoRefreshBtn" class="ghost">Auto Refresh: Off</button>
+          </div>
         </div>
       </aside>
 
       <main class="content">
         <section class="hero">
           <div>
-            <p class="eyebrow">Analyst View</p>
-            <h2>Monitor live cases, dataset readiness, phishing triage, and entity graph exposure in one place.</h2>
+            <p class="eyebrow">Control Tower</p>
+            <h2>Review active fraud pressure, move cases through triage, watch queue health, and operate models without leaving the console.</h2>
           </div>
-          <div class="hero-chip" id="statusChip">Waiting for data</div>
+          <div class="hero-status">
+            <div class="hero-chip" id="statusChip">Ready</div>
+            <div class="hero-chip neutral" id="lastRefresh">Not refreshed yet</div>
+          </div>
         </section>
 
         <section id="metrics" class="metric-grid"></section>
 
         <section class="panel-grid">
-          <article class="panel">
-            <div class="panel-head">
-              <h3>Recent Cases</h3>
-              <button id="refreshBtn" class="ghost small">Refresh</button>
+          <article class="panel wide-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Fraud queue</p>
+                <h3>Cases</h3>
+              </div>
+              <div class="toolbar">
+                <select id="caseActionFilter">
+                  <option value="">All actions</option>
+                  <option value="ALLOW">Allow</option>
+                  <option value="CHALLENGE">Challenge</option>
+                  <option value="BLOCK">Block</option>
+                </select>
+                <select id="caseStatusFilter">
+                  <option value="">All statuses</option>
+                  <option value="OPEN">Open</option>
+                  <option value="INVESTIGATING">Investigating</option>
+                  <option value="RESOLVED">Resolved</option>
+                </select>
+              </div>
             </div>
             <div id="cases" class="case-list"></div>
           </article>
 
           <article class="panel stack-panel">
-            <div class="panel-head">
-              <h3>Signal Heatmap</h3>
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Live pressure</p>
+                <h3>Top Signals</h3>
+              </div>
             </div>
             <div id="signals" class="signal-list"></div>
-            <div class="panel-head top-gap">
-              <h3>API Keys</h3>
-              <button id="newKeyBtn" class="ghost small">Create</button>
+            <div class="section-head top-gap">
+              <div>
+                <p class="eyebrow subtle">Data readiness</p>
+                <h3>Datasets</h3>
+              </div>
+            </div>
+            <div id="datasets" class="signal-list"></div>
+            <div class="section-head top-gap">
+              <div>
+                <p class="eyebrow subtle">System</p>
+                <h3>Monitoring</h3>
+              </div>
+            </div>
+            <div id="monitoring" class="signal-list"></div>
+          </article>
+        </section>
+
+        <section class="panel-grid lower-grid">
+          <article class="panel detail-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Investigation</p>
+                <h3>Case Detail</h3>
+              </div>
+            </div>
+            <div id="detailEmpty" class="empty-state">Select a case to inspect reasons, factors, linked entities, and analyst actions.</div>
+            <div id="detail" class="detail hidden">
+              <div class="detail-top">
+                <div>
+                  <p class="muted">Request ID</p>
+                  <h4 id="detailId"></h4>
+                </div>
+                <div id="detailAction" class="hero-chip"></div>
+              </div>
+              <div class="detail-grid">
+                <div>
+                  <p class="muted">Reasons</p>
+                  <ul id="detailReasons"></ul>
+                </div>
+                <div>
+                  <p class="muted">Contributing Factors</p>
+                  <div id="detailFactors" class="signal-list"></div>
+                </div>
+              </div>
+              <div class="ops-row">
+                <select id="caseStatus">
+                  <option value="OPEN">Open</option>
+                  <option value="INVESTIGATING">Investigating</option>
+                  <option value="RESOLVED">Resolved</option>
+                </select>
+                <input id="caseAssignee" placeholder="Assigned analyst" />
+                <button id="saveStatusBtn" type="button">Save Case</button>
+              </div>
+              <div class="payload-block">
+                <p class="muted">Request Payload</p>
+                <pre id="detailPayload"></pre>
+              </div>
+              <form id="feedbackForm" class="feedback-form">
+                <select id="feedbackLabel">
+                  <option value="CONFIRMED_FRAUD">Confirmed Fraud</option>
+                  <option value="FALSE_POSITIVE">False Positive</option>
+                  <option value="SAFE">Safe</option>
+                </select>
+                <input id="feedbackNotes" placeholder="Analyst notes" />
+                <button type="submit">Save Feedback</button>
+              </form>
+            </div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Connected entities</p>
+                <h3>Graph</h3>
+              </div>
+            </div>
+            <form id="graphForm" class="graph-form compact-form">
+              <select id="graphEntityType">
+                <option value="user">User</option>
+                <option value="device">Device</option>
+                <option value="payee">Payee</option>
+                <option value="phone_hash">Phone Hash</option>
+                <option value="pan_hash">PAN Hash</option>
+              </select>
+              <input id="graphEntityId" placeholder="Enter entity ID or hash" />
+              <button type="submit">Inspect</button>
+            </form>
+            <div id="graphResult" class="empty-state">Select a linked identifier or search manually to inspect graph exposure.</div>
+            <div class="section-head top-gap">
+              <div>
+                <p class="eyebrow subtle">Quick links</p>
+                <h3>Linked IDs</h3>
+              </div>
+            </div>
+            <div id="graphLinks" class="signal-list">
+              <div class="empty-state">Case-linked entities appear here.</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="triple-grid">
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Models</p>
+                <h3>Registry</h3>
+              </div>
+              <button id="enqueueRetrainingBtn" class="ghost small">Queue Retraining</button>
+            </div>
+            <div id="models" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Model quality</p>
+                <h3>Evaluation Summary</h3>
+              </div>
+            </div>
+            <div id="modelSummary" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Background work</p>
+                <h3>Jobs</h3>
+              </div>
+            </div>
+            <div id="jobs" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Deliverability</p>
+                <h3>Webhook Queue</h3>
+              </div>
+            </div>
+            <div id="webhooks" class="signal-list"></div>
+          </article>
+        </section>
+
+        <section class="panel-grid lower-grid admin-grid">
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Ingestion</p>
+                <h3>Connectors</h3>
+              </div>
+            </div>
+            <form id="connectorForm" class="connector-form compact-form">
+              <select id="connectorRoute">
+                <option value="session">Session</option>
+                <option value="onboard">Onboard</option>
+                <option value="transaction">Transaction</option>
+                <option value="phishing">Phishing</option>
+              </select>
+              <input id="connectorSourcePath" placeholder="C:\\path\\to\\events.json" />
+              <button type="submit">Create Connector</button>
+            </form>
+            <div id="connectors" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Access</p>
+                <h3>Analysts & Keys</h3>
+              </div>
+              <button id="newKeyBtn" class="ghost small">Create API Key</button>
+            </div>
+            <div id="analysts" class="signal-list"></div>
+            <div class="section-head top-gap">
+              <div>
+                <p class="eyebrow subtle">Service access</p>
+                <h3>API Keys</h3>
+              </div>
             </div>
             <div id="apiKeys" class="signal-list"></div>
           </article>
@@ -63,15 +300,11 @@
 
         <section class="panel-grid lower-grid">
           <article class="panel stack-panel">
-            <div class="panel-head">
-              <h3>Dataset Inventory</h3>
-            </div>
-            <div id="datasets" class="signal-list"></div>
-          </article>
-
-          <article class="panel stack-panel">
-            <div class="panel-head">
-              <h3>Phishing Quick Screen</h3>
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Threat intake</p>
+                <h3>Phishing Quick Screen</h3>
+              </div>
             </div>
             <form id="phishingForm" class="phishing-form">
               <input id="phishingUrl" placeholder="https://suspicious-site.example/login" />
@@ -109,85 +342,18 @@
               </select>
               <button type="submit">Score URL Risk</button>
             </form>
-            <div id="phishingResult" class="empty-state">Run a quick phishing screen to generate a live case and explanation.</div>
-          </article>
-        </section>
-
-        <section class="panel-grid lower-grid">
-          <article class="panel stack-panel">
-            <div class="panel-head">
-              <h3>Graph Lookup</h3>
-            </div>
-            <form id="graphForm" class="graph-form">
-              <select id="graphEntityType">
-                <option value="user">User</option>
-                <option value="device">Device</option>
-                <option value="payee">Payee</option>
-                <option value="phone_hash">Phone Hash</option>
-                <option value="pan_hash">PAN Hash</option>
-              </select>
-              <input id="graphEntityId" placeholder="Enter entity ID or hash" />
-              <button type="submit">Inspect Graph Entity</button>
-            </form>
-            <div id="graphResult" class="empty-state">Look up a user, device, payee, or shared identifier to inspect graph-linked risk.</div>
+            <div id="phishingResult" class="empty-state">Run a phishing screen to create a live case and explanation trail.</div>
           </article>
 
-          <article class="panel stack-panel">
-            <div class="panel-head">
-              <h3>Quick Graph Links</h3>
+          <article class="panel stack-panel admin-only" id="securityAuditPanel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Compliance</p>
+                <h3>Security Audit</h3>
+              </div>
             </div>
-            <div id="graphLinks" class="signal-list">
-              <div class="empty-state">Select a case to reveal graph lookups for its linked entities.</div>
-            </div>
+            <div id="securityAudit" class="signal-list"></div>
           </article>
-        </section>
-
-        <section class="panel detail-panel">
-          <div class="panel-head">
-            <h3>Case Detail</h3>
-          </div>
-          <div id="detailEmpty" class="empty-state">Select a case to inspect factors, assign status, and submit feedback.</div>
-          <div id="detail" class="detail hidden">
-            <div class="detail-top">
-              <div>
-                <p class="muted">Request ID</p>
-                <h4 id="detailId"></h4>
-              </div>
-              <div id="detailAction" class="hero-chip"></div>
-            </div>
-            <div class="detail-grid">
-              <div>
-                <p class="muted">Reasons</p>
-                <ul id="detailReasons"></ul>
-              </div>
-              <div>
-                <p class="muted">Top Factors</p>
-                <div id="detailFactors"></div>
-              </div>
-            </div>
-            <div class="ops-row">
-              <select id="caseStatus">
-                <option value="OPEN">Open</option>
-                <option value="INVESTIGATING">Investigating</option>
-                <option value="RESOLVED">Resolved</option>
-              </select>
-              <input id="caseAssignee" placeholder="Assigned analyst" />
-              <button id="saveStatusBtn" type="button">Save Case Status</button>
-            </div>
-            <div class="payload-block">
-              <p class="muted">Request Payload</p>
-              <pre id="detailPayload"></pre>
-            </div>
-            <form id="feedbackForm" class="feedback-form">
-              <select id="feedbackLabel">
-                <option value="CONFIRMED_FRAUD">Confirmed Fraud</option>
-                <option value="FALSE_POSITIVE">False Positive</option>
-                <option value="SAFE">Safe</option>
-              </select>
-              <input id="feedbackNotes" placeholder="Optional notes" />
-              <button type="submit">Save Feedback</button>
-            </form>
-          </div>
         </section>
       </main>
     </div>
@@ -195,3 +361,5 @@
     <script src="/dashboard/assets/app.js"></script>
   </body>
 </html>
+
+

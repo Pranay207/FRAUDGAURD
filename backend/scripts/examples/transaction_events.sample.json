@@ -1,0 +1,26 @@
+[
+  {
+    "user_id": "real-user-1",
+    "amount_paise": 24000,
+    "payee_vpa": "merchant@upi",
+    "upi_remark": "grocery payment",
+    "session_id": "sess-real-1",
+    "device_id": "device-real-1",
+    "ip_country": "IN",
+    "transaction_type": "TRANSFER",
+    "source_balance_paise": 95000,
+    "destination_balance_paise": 15000
+  },
+  {
+    "user_id": "real-user-2",
+    "amount_paise": 185000,
+    "payee_vpa": "urgent-clearance@upi",
+    "upi_remark": "Government clearance payment",
+    "session_id": "sess-real-2",
+    "device_id": "device-shared-1",
+    "ip_country": "AE",
+    "transaction_type": "TRANSFER",
+    "source_balance_paise": 190000,
+    "destination_balance_paise": 0
+  }
+]

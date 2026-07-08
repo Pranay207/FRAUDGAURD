@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import time
@@ -8,7 +8,7 @@ from uuid import uuid4
 from app.engine.ensemble import LayerScores, combine_scores
 from app.engine.features import BehavioralFeatures, days_since, duration_zscore, login_hour_anomaly
 from app.engine.rules import SOCIAL_ENGINEERING_TERMS, clamp
-from app.schemas import OnboardRequest, PhishingScoreRequest, ScoreResponse, SessionScoreRequest, TransactionScoreRequest
+from app.schemas import BulkItemFailure, BulkScoreResponse, OnboardRequest, PhishingScoreRequest, ScoreResponse, SessionScoreRequest, TransactionScoreRequest
 from app.security import TenantContext
 from app.services.models import model_registry
 from app.services.repository import repository
@@ -60,7 +60,7 @@ class FraudEngine:
             txn_velocity_5min=repository.transaction_velocity(tenant.tenant_id, req.user_id),
             days_since_last_login=days_since(self._parse_dt(profile["last_login_at"])),
         )
-        behavioral_score, reasons, factors = self._behavioral_score(features)
+        behavioral_score, reasons, factors = self._behavioral_score(tenant.tenant_id, features)
         action = self._action_for_score(behavioral_score)
 
         repository.upsert_user_identity(tenant.tenant_id, req.user_id, None, None, None, None)
@@ -78,7 +78,7 @@ class FraudEngine:
     async def score_onboard(self, tenant: TenantContext, req: OnboardRequest) -> ScoreResponse:
         start = time.perf_counter()
         links = repository.get_device_link_counts(tenant.tenant_id, req.device.device_id, req.phone_hash, req.pan_hash)
-        identity_score, reasons, factors = self._identity_score(req, links)
+        identity_score, reasons, factors = self._identity_score(tenant.tenant_id, req, links)
         action = self._action_for_score(identity_score)
 
         repository.upsert_user_identity(tenant.tenant_id, req.user_id, req.pan_hash, req.phone_hash, req.aadhaar_last4, req.email_hash)
@@ -99,8 +99,8 @@ class FraudEngine:
         current_velocity = repository.transaction_velocity(tenant.tenant_id, req.user_id)
         payee_graph = repository.get_payee_graph_counts(tenant.tenant_id, req.payee_vpa)
 
-        behavioral_task = self._behavioral_for_transaction(profile, req.device_id, req.ip_country, current_velocity)
-        transaction_task = self._transaction_score(
+        behavioral_task = self._behavioral_for_transaction(tenant.tenant_id, profile, req.device_id, req.ip_country, current_velocity)
+        transaction_task = self._transaction_score(tenant.tenant_id, 
             req.amount_paise,
             first_time_payee,
             current_velocity + 1,
@@ -110,7 +110,7 @@ class FraudEngine:
             req.destination_balance_paise,
             payee_graph,
         )
-        remark_task = self._remark_score(req.upi_remark, req.payee_vpa, req.amount_paise, first_time_payee)
+        remark_task = self._remark_score(tenant.tenant_id, req.upi_remark, req.payee_vpa, req.amount_paise, first_time_payee)
         behavioral, transaction, remark = await asyncio.gather(behavioral_task, transaction_task, remark_task)
 
         final_score, action = combine_scores(LayerScores(behavioral=behavioral["score"], identity=0, transaction=transaction["score"], remark=remark["score"]))
@@ -131,7 +131,7 @@ class FraudEngine:
 
     async def score_phishing(self, tenant: TenantContext, req: PhishingScoreRequest) -> ScoreResponse:
         start = time.perf_counter()
-        score, reasons, factors = self._phishing_score(req)
+        score, reasons, factors = self._phishing_score(tenant.tenant_id, req)
         action = self._action_for_score(score)
 
         request_id = str(uuid4())
@@ -140,6 +140,28 @@ class FraudEngine:
         repository.write_audit_event(tenant.tenant_id, request_id, "phishing", None, response.fraud_score, response.action, response.reasons, factors, req.model_dump())
         self._queue_case_webhooks(tenant.tenant_id, response, "phishing")
         return response
+
+    async def score_session_batch(self, tenant: TenantContext, requests: list[SessionScoreRequest]) -> BulkScoreResponse:
+        return await self._score_batch("session", requests, lambda item: self.score_session(tenant, item))
+
+    async def score_onboard_batch(self, tenant: TenantContext, requests: list[OnboardRequest]) -> BulkScoreResponse:
+        return await self._score_batch("onboard", requests, lambda item: self.score_onboard(tenant, item))
+
+    async def score_transaction_batch(self, tenant: TenantContext, requests: list[TransactionScoreRequest]) -> BulkScoreResponse:
+        return await self._score_batch("transaction", requests, lambda item: self.score_transaction(tenant, item))
+
+    async def score_phishing_batch(self, tenant: TenantContext, requests: list[PhishingScoreRequest]) -> BulkScoreResponse:
+        return await self._score_batch("phishing", requests, lambda item: self.score_phishing(tenant, item))
+
+    async def _score_batch(self, route: str, requests: list, scorer) -> BulkScoreResponse:
+        results = []
+        failures = []
+        for index, item in enumerate(requests):
+            try:
+                results.append(await scorer(item))
+            except Exception as exc:
+                failures.append(BulkItemFailure(index=index, error=str(exc) or exc.__class__.__name__))
+        return BulkScoreResponse(route=route, accepted=len(results), rejected=len(failures), results=results, failures=failures)
 
     async def explain(self, tenant: TenantContext, request_id: str) -> dict | None:
         payload = repository.get_audit_event(tenant.tenant_id, request_id)
@@ -241,7 +263,7 @@ class FraudEngine:
         if response.action == "BLOCK":
             repository.enqueue_webhook_deliveries(tenant_id, "fraud.case.blocked", response.request_id, {"route": route, **response.model_dump()})
 
-    def _behavioral_score(self, features: BehavioralFeatures) -> tuple[int, list[str], list[dict]]:
+    def _behavioral_score(self, tenant_id: str, features: BehavioralFeatures) -> tuple[int, list[str], list[dict]]:
         parts = []
         reasons = []
         if features.is_new_device:
@@ -263,7 +285,7 @@ class FraudEngine:
             parts.append(("session_duration_shift", 80, "Session duration is materially different from the norm"))
             reasons.append("Session duration anomaly")
         heuristic_score = clamp(sum(impact for _, impact, _ in parts))
-        model_prediction = model_registry.behavioral_score(features, heuristic_score)
+        model_prediction = model_registry.behavioral_score(tenant_id, features, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
         if model_prediction.model_used:
@@ -272,7 +294,7 @@ class FraudEngine:
                 reasons.append("Behavioral model consensus risk")
         return score, reasons or ["No major behavioral anomalies"], factors
 
-    async def _behavioral_for_transaction(self, profile: dict, device_id: str, ip_country: str, velocity: int) -> dict:
+    async def _behavioral_for_transaction(self, tenant_id: str, profile: dict, device_id: str, ip_country: str, velocity: int) -> dict:
         features = BehavioralFeatures(
             keystroke_interval_deviation=0.0,
             is_new_device=int(device_id not in profile["known_devices"]),
@@ -282,11 +304,12 @@ class FraudEngine:
             txn_velocity_5min=velocity,
             days_since_last_login=days_since(self._parse_dt(profile["last_login_at"])),
         )
-        score, reasons, factors = self._behavioral_score(features)
+        score, reasons, factors = self._behavioral_score(tenant_id, features)
         return {"score": score, "reasons": reasons, "factors": factors}
 
     async def _transaction_score(
         self,
+        tenant_id: str,
         amount_paise: int,
         first_time_payee: bool,
         velocity: int,
@@ -340,7 +363,7 @@ class FraudEngine:
             float(destination_balance_paise or 0),
             float(drain_ratio),
         ]
-        model_prediction = model_registry.transaction_score(feature_values, heuristic_score)
+        model_prediction = model_registry.transaction_score(tenant_id, feature_values, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
         if model_prediction.model_used:
@@ -349,7 +372,7 @@ class FraudEngine:
                 reasons.append("Transaction model consensus risk")
         return {"score": score, "reasons": reasons or ["No major transaction anomalies"], "factors": factors}
 
-    async def _remark_score(self, upi_remark: str, payee_vpa: str, amount_paise: int, first_time_payee: bool) -> dict:
+    async def _remark_score(self, tenant_id: str, upi_remark: str, payee_vpa: str, amount_paise: int, first_time_payee: bool) -> dict:
         text = f"{upi_remark} {payee_vpa}".lower()
         parts = []
         reasons = []
@@ -362,7 +385,7 @@ class FraudEngine:
         if parts:
             reasons.append("Remark resembles social-engineering language")
         heuristic_score = clamp(sum(impact for _, impact, _ in parts))
-        model_prediction = model_registry.remark_score(text, heuristic_score)
+        model_prediction = model_registry.remark_score(tenant_id, text, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
         if model_prediction.model_used:
@@ -371,11 +394,11 @@ class FraudEngine:
                 reasons.append("Remark classifier consensus risk")
         return {"score": score, "reasons": reasons or ["Remark is low risk"], "factors": factors}
 
-    def _phishing_score(self, req: PhishingScoreRequest) -> tuple[int, list[str], list[dict]]:
+    def _phishing_score(self, tenant_id: str, req: PhishingScoreRequest) -> tuple[int, list[str], list[dict]]:
         feature_values = [float(getattr(req, name)) for name in PHISHING_FEATURE_FIELDS]
         activated_flags = sum(1 for value in feature_values if value != 0)
         heuristic_score = clamp(activated_flags * 18)
-        model_prediction = model_registry.phishing_feature_score(feature_values, heuristic_score)
+        model_prediction = model_registry.phishing_feature_score(tenant_id, feature_values, heuristic_score)
         score = model_prediction.score
 
         factors = [
@@ -406,7 +429,7 @@ class FraudEngine:
             reasons = ["URL feature vector is low risk"]
         return score, reasons, factors
 
-    def _identity_score(self, req: OnboardRequest, links: dict[str, int]) -> tuple[int, list[str], list[dict]]:
+    def _identity_score(self, tenant_id: str, req: OnboardRequest, links: dict[str, int]) -> tuple[int, list[str], list[dict]]:
         parts = []
         reasons = []
         if links["device_users"] >= 1:
@@ -444,7 +467,7 @@ class FraudEngine:
             float(1.0 - req.kyc_name_match_score),
             float(int(req.device.is_rooted or req.device.sim_count >= 3)),
         ]
-        model_prediction = model_registry.identity_score(feature_values, heuristic_score)
+        model_prediction = model_registry.identity_score(tenant_id, feature_values, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
         if model_prediction.model_used:
@@ -467,3 +490,6 @@ class FraudEngine:
 
 
 engine = FraudEngine()
+
+
+
