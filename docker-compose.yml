@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  api:
+    build: ./backend
+    ports:
+      - "8000:8000"
+    environment:
+      FRAUDGUARD_API_KEY: test_key
+      FRAUDGUARD_AUDIT_LOG_PATH: /app/data/audit_logs.jsonl
+      FRAUDGUARD_DATABASE_URL: postgresql://fg:fg@postgres:5432/fraudguard
+    volumes:
+      - ./backend/data:/app/data
+    depends_on:
+      - postgres
+      - redis
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fg
+      POSTGRES_PASSWORD: fg
+      POSTGRES_DB: fraudguard
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+volumes:
+  pgdata:

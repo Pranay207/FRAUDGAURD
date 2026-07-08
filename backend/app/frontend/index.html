@@ -1,0 +1,197 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>FraudGuard Console</title>
+    <link rel="stylesheet" href="/dashboard/assets/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div>
+          <p class="eyebrow">FraudGuard</p>
+          <h1>Risk Console</h1>
+          <p class="lede">Real-time fraud triage for onboarding, sessions, payments, phishing review, and graph-linked entity risk.</p>
+          <div class="tenant-card">
+            <div class="muted">Tenant</div>
+            <strong id="tenantName">Loading...</strong>
+            <div class="case-meta" id="tenantMeta"></div>
+          </div>
+        </div>
+        <div class="auth-card">
+          <label for="apiKey">API key</label>
+          <input id="apiKey" value="test_key" />
+          <button id="connectBtn">Load Console</button>
+          <button id="seedBtn" class="ghost">Seed Demo Data</button>
+          <button id="dispatchBtn" class="ghost">Dispatch Webhooks</button>
+        </div>
+      </aside>
+
+      <main class="content">
+        <section class="hero">
+          <div>
+            <p class="eyebrow">Analyst View</p>
+            <h2>Monitor live cases, dataset readiness, phishing triage, and entity graph exposure in one place.</h2>
+          </div>
+          <div class="hero-chip" id="statusChip">Waiting for data</div>
+        </section>
+
+        <section id="metrics" class="metric-grid"></section>
+
+        <section class="panel-grid">
+          <article class="panel">
+            <div class="panel-head">
+              <h3>Recent Cases</h3>
+              <button id="refreshBtn" class="ghost small">Refresh</button>
+            </div>
+            <div id="cases" class="case-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="panel-head">
+              <h3>Signal Heatmap</h3>
+            </div>
+            <div id="signals" class="signal-list"></div>
+            <div class="panel-head top-gap">
+              <h3>API Keys</h3>
+              <button id="newKeyBtn" class="ghost small">Create</button>
+            </div>
+            <div id="apiKeys" class="signal-list"></div>
+          </article>
+        </section>
+
+        <section class="panel-grid lower-grid">
+          <article class="panel stack-panel">
+            <div class="panel-head">
+              <h3>Dataset Inventory</h3>
+            </div>
+            <div id="datasets" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="panel-head">
+              <h3>Phishing Quick Screen</h3>
+            </div>
+            <form id="phishingForm" class="phishing-form">
+              <input id="phishingUrl" placeholder="https://suspicious-site.example/login" />
+              <select id="havingIpAddress">
+                <option value="-1">IP address in URL</option>
+                <option value="0">Neutral</option>
+                <option value="1">Normal domain</option>
+              </select>
+              <select id="urlLength">
+                <option value="1">Long URL</option>
+                <option value="0">Medium URL</option>
+                <option value="-1">Short URL</option>
+              </select>
+              <select id="prefixSuffix">
+                <option value="-1">Domain uses dash</option>
+                <option value="1">No dash</option>
+              </select>
+              <select id="sslState">
+                <option value="-1">Weak or missing HTTPS</option>
+                <option value="0">Unclear HTTPS</option>
+                <option value="1">Trusted HTTPS</option>
+              </select>
+              <select id="domainRegistrationLength">
+                <option value="-1">Short registration window</option>
+                <option value="1">Long registration window</option>
+              </select>
+              <select id="webTraffic">
+                <option value="1">Low traffic / obscure</option>
+                <option value="0">Unknown traffic</option>
+                <option value="-1">Established traffic</option>
+              </select>
+              <select id="googleIndex">
+                <option value="1">Not indexed or suspicious</option>
+                <option value="-1">Indexed normally</option>
+              </select>
+              <button type="submit">Score URL Risk</button>
+            </form>
+            <div id="phishingResult" class="empty-state">Run a quick phishing screen to generate a live case and explanation.</div>
+          </article>
+        </section>
+
+        <section class="panel-grid lower-grid">
+          <article class="panel stack-panel">
+            <div class="panel-head">
+              <h3>Graph Lookup</h3>
+            </div>
+            <form id="graphForm" class="graph-form">
+              <select id="graphEntityType">
+                <option value="user">User</option>
+                <option value="device">Device</option>
+                <option value="payee">Payee</option>
+                <option value="phone_hash">Phone Hash</option>
+                <option value="pan_hash">PAN Hash</option>
+              </select>
+              <input id="graphEntityId" placeholder="Enter entity ID or hash" />
+              <button type="submit">Inspect Graph Entity</button>
+            </form>
+            <div id="graphResult" class="empty-state">Look up a user, device, payee, or shared identifier to inspect graph-linked risk.</div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="panel-head">
+              <h3>Quick Graph Links</h3>
+            </div>
+            <div id="graphLinks" class="signal-list">
+              <div class="empty-state">Select a case to reveal graph lookups for its linked entities.</div>
+            </div>
+          </article>
+        </section>
+
+        <section class="panel detail-panel">
+          <div class="panel-head">
+            <h3>Case Detail</h3>
+          </div>
+          <div id="detailEmpty" class="empty-state">Select a case to inspect factors, assign status, and submit feedback.</div>
+          <div id="detail" class="detail hidden">
+            <div class="detail-top">
+              <div>
+                <p class="muted">Request ID</p>
+                <h4 id="detailId"></h4>
+              </div>
+              <div id="detailAction" class="hero-chip"></div>
+            </div>
+            <div class="detail-grid">
+              <div>
+                <p class="muted">Reasons</p>
+                <ul id="detailReasons"></ul>
+              </div>
+              <div>
+                <p class="muted">Top Factors</p>
+                <div id="detailFactors"></div>
+              </div>
+            </div>
+            <div class="ops-row">
+              <select id="caseStatus">
+                <option value="OPEN">Open</option>
+                <option value="INVESTIGATING">Investigating</option>
+                <option value="RESOLVED">Resolved</option>
+              </select>
+              <input id="caseAssignee" placeholder="Assigned analyst" />
+              <button id="saveStatusBtn" type="button">Save Case Status</button>
+            </div>
+            <div class="payload-block">
+              <p class="muted">Request Payload</p>
+              <pre id="detailPayload"></pre>
+            </div>
+            <form id="feedbackForm" class="feedback-form">
+              <select id="feedbackLabel">
+                <option value="CONFIRMED_FRAUD">Confirmed Fraud</option>
+                <option value="FALSE_POSITIVE">False Positive</option>
+                <option value="SAFE">Safe</option>
+              </select>
+              <input id="feedbackNotes" placeholder="Optional notes" />
+              <button type="submit">Save Feedback</button>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/dashboard/assets/app.js"></script>
+  </body>
+</html>

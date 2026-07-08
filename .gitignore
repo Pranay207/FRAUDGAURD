@@ -1,0 +1,8 @@
+backend/.venv/
+backend/.pytest_cache/
+backend/fraudguard_backend.egg-info/
+backend/**/__pycache__/
+backend/**/*.pyc
+backend/data/raw/
+backend/data/*.db
+backend/data/*.jsonl

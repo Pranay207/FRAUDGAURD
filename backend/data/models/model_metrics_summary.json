@@ -1,0 +1,94 @@
+{
+  "models": {
+    "behavioral": {
+      "version_id": "80dcefc3-2a79-4f54-ad73-5aa94e5b8826",
+      "artifact_path": "data\\models\\behavioral_risk.joblib",
+      "metrics": {
+        "auc": 0.9471,
+        "precision": 0.8696,
+        "recall": 0.8065,
+        "f1": 0.8368,
+        "accuracy": 0.87,
+        "true_negatives": 161,
+        "false_positives": 15,
+        "false_negatives": 24,
+        "true_positives": 100,
+        "negative_support": 176,
+        "positive_support": 124,
+        "total_test_samples": 300
+      }
+    },
+    "identity": {
+      "version_id": "0e8dbd70-6761-4abd-8410-572d0ee5f114",
+      "artifact_path": "data\\models\\identity_risk.joblib",
+      "metrics": {
+        "auc": 0.9589,
+        "precision": 0.9404,
+        "recall": 0.9822,
+        "f1": 0.9609,
+        "accuracy": 0.928,
+        "true_negatives": 11,
+        "false_positives": 14,
+        "false_negatives": 4,
+        "true_positives": 221,
+        "negative_support": 25,
+        "positive_support": 225,
+        "total_test_samples": 250
+      }
+    },
+    "phishing_feature": {
+      "version_id": "ad08de48-7a37-47df-8687-9773c53388d1",
+      "artifact_path": "data\\models\\phishing_feature_risk.joblib",
+      "metrics": {
+        "auc": 0.9788,
+        "precision": 0.9388,
+        "recall": 0.902,
+        "f1": 0.9201,
+        "accuracy": 0.9305,
+        "true_negatives": 1467,
+        "false_positives": 72,
+        "false_negatives": 120,
+        "true_positives": 1105,
+        "negative_support": 1539,
+        "positive_support": 1225,
+        "total_test_samples": 2764
+      }
+    },
+    "remark": {
+      "version_id": "360672a9-23f4-4331-b727-a2d2a28858e2",
+      "artifact_path": "data\\models\\remark_risk.joblib",
+      "metrics": {
+        "auc": 0.9925,
+        "precision": 0.9309,
+        "recall": 0.9309,
+        "f1": 0.9309,
+        "accuracy": 0.9814,
+        "true_negatives": 1196,
+        "false_positives": 13,
+        "false_negatives": 13,
+        "true_positives": 175,
+        "negative_support": 1209,
+        "positive_support": 188,
+        "total_test_samples": 1397
+      }
+    },
+    "transaction": {
+      "version_id": "bb94d8e3-7b7c-4e65-894f-b2cb2e704b2f",
+      "artifact_path": "data\\models\\transaction_risk.joblib",
+      "metrics": {
+        "auc": 0.9677,
+        "precision": 0.5096,
+        "recall": 0.9966,
+        "f1": 0.6744,
+        "accuracy": 0.9472,
+        "true_negatives": 33422,
+        "false_positives": 1969,
+        "false_negatives": 7,
+        "true_positives": 2046,
+        "negative_support": 35391,
+        "positive_support": 2053,
+        "total_test_samples": 37444
+      }
+    }
+  }
+}
