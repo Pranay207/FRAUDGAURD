@@ -6,12 +6,17 @@ from pathlib import Path
 from app.config import get_settings
 from app.engine.features import BehavioralFeatures
 from app.services.repository import repository
+from app.services.transformer_text import TransformerTextClassifier
 
 
 @dataclass
 class ModelPrediction:
     score: int
     model_used: bool
+    model_name: str
+    version_id: str | None = None
+    artifact_path: str | None = None
+    source: str = "fallback_logic"
 
 
 MODEL_DEFAULTS = {
@@ -54,17 +59,19 @@ class ModelRegistry:
 
     def _predict_numeric(self, tenant_id: str, model_name: str, vector: list[list[float]], fallback: int) -> ModelPrediction:
         model = self._load_model(tenant_id, model_name)
+        metadata = self._prediction_metadata(tenant_id, model_name, model is not None)
         if model is None:
-            return ModelPrediction(score=fallback, model_used=False)
+            return ModelPrediction(score=fallback, model_used=False, **metadata)
         probability = float(model.predict_proba(vector)[0][1])
-        return ModelPrediction(score=max(0, min(1000, int(probability * 1000))), model_used=True)
+        return ModelPrediction(score=max(0, min(1000, int(probability * 1000))), model_used=True, **metadata)
 
     def _predict_text(self, tenant_id: str, model_name: str, texts: list[str], fallback: int) -> ModelPrediction:
         model = self._load_model(tenant_id, model_name)
+        metadata = self._prediction_metadata(tenant_id, model_name, model is not None)
         if model is None:
-            return ModelPrediction(score=fallback, model_used=False)
+            return ModelPrediction(score=fallback, model_used=False, **metadata)
         probability = float(model.predict_proba(texts)[0][1])
-        return ModelPrediction(score=max(0, min(1000, int(probability * 1000))), model_used=True)
+        return ModelPrediction(score=max(0, min(1000, int(probability * 1000))), model_used=True, **metadata)
 
     def _resolve_artifact_path(self, tenant_id: str, model_name: str) -> Path:
         active_version = repository.get_active_model_version(tenant_id, model_name)
@@ -73,6 +80,26 @@ class ModelRegistry:
             if artifact_path.exists():
                 return artifact_path
         return self._artifact_dir / MODEL_DEFAULTS[model_name]
+
+    def _prediction_metadata(self, tenant_id: str, model_name: str, model_loaded: bool) -> dict:
+        active_version = repository.get_active_model_version(tenant_id, model_name)
+        resolved_path = self._resolve_artifact_path(tenant_id, model_name)
+        trained_artifact_active = False
+        if active_version:
+            active_artifact = Path(active_version["artifact_path"])
+            trained_artifact_active = active_artifact.exists() and active_artifact == resolved_path
+        if not model_loaded:
+            source = "fallback_logic"
+        elif trained_artifact_active:
+            source = "trained_artifact"
+        else:
+            source = "packaged_artifact"
+        return {
+            "model_name": model_name,
+            "version_id": active_version["version_id"] if trained_artifact_active else None,
+            "artifact_path": str(resolved_path),
+            "source": source,
+        }
 
     def _load_model(self, tenant_id: str, model_name: str):
         path = self._resolve_artifact_path(tenant_id, model_name)
@@ -83,6 +110,11 @@ class ModelRegistry:
         if not path.exists():
             self._cache[cache_key] = None
             return None
+
+        if path.is_dir():
+            model = TransformerTextClassifier(path)
+            self._cache[cache_key] = model
+            return model
 
         try:
             import joblib
@@ -99,3 +131,5 @@ class ModelRegistry:
 
 
 model_registry = ModelRegistry()
+
+

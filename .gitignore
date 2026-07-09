@@ -6,3 +6,5 @@ backend/**/*.pyc
 backend/data/raw/
 backend/data/*.db
 backend/data/*.jsonl
+data/models/
+data/reports/

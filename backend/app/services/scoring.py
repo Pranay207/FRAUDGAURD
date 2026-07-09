@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import time
@@ -60,7 +60,7 @@ class FraudEngine:
             txn_velocity_5min=repository.transaction_velocity(tenant.tenant_id, req.user_id),
             days_since_last_login=days_since(self._parse_dt(profile["last_login_at"])),
         )
-        behavioral_score, reasons, factors = self._behavioral_score(tenant.tenant_id, features)
+        behavioral_score, reasons, factors, model_evidence = self._behavioral_score(tenant.tenant_id, features)
         action = self._action_for_score(behavioral_score)
 
         repository.upsert_user_identity(tenant.tenant_id, req.user_id, None, None, None, None)
@@ -71,14 +71,13 @@ class FraudEngine:
         request_id = str(uuid4())
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
         response = ScoreResponse(request_id=request_id, fraud_score=behavioral_score, action=action, reasons=reasons, latency_ms=latency_ms)
-        repository.write_audit_event(tenant.tenant_id, request_id, "session", req.user_id, response.fraud_score, response.action, response.reasons, factors, req.model_dump())
-        self._queue_case_webhooks(tenant.tenant_id, response, "session")
+        self._finalize_decision(tenant, request_id, "session", req.user_id, response, factors, req.model_dump(), model_evidence)
         return response
 
     async def score_onboard(self, tenant: TenantContext, req: OnboardRequest) -> ScoreResponse:
         start = time.perf_counter()
         links = repository.get_device_link_counts(tenant.tenant_id, req.device.device_id, req.phone_hash, req.pan_hash)
-        identity_score, reasons, factors = self._identity_score(tenant.tenant_id, req, links)
+        identity_score, reasons, factors, model_evidence = self._identity_score(tenant.tenant_id, req, links)
         action = self._action_for_score(identity_score)
 
         repository.upsert_user_identity(tenant.tenant_id, req.user_id, req.pan_hash, req.phone_hash, req.aadhaar_last4, req.email_hash)
@@ -88,8 +87,7 @@ class FraudEngine:
         request_id = str(uuid4())
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
         response = ScoreResponse(request_id=request_id, fraud_score=identity_score, action=action, reasons=reasons, latency_ms=latency_ms)
-        repository.write_audit_event(tenant.tenant_id, request_id, "onboard", req.user_id, response.fraud_score, response.action, response.reasons, factors, req.model_dump())
-        self._queue_case_webhooks(tenant.tenant_id, response, "onboard")
+        self._finalize_decision(tenant, request_id, "onboard", req.user_id, response, factors, req.model_dump(), model_evidence)
         return response
 
     async def score_transaction(self, tenant: TenantContext, req: TransactionScoreRequest) -> ScoreResponse:
@@ -114,6 +112,7 @@ class FraudEngine:
         behavioral, transaction, remark = await asyncio.gather(behavioral_task, transaction_task, remark_task)
 
         final_score, action = combine_scores(LayerScores(behavioral=behavioral["score"], identity=0, transaction=transaction["score"], remark=remark["score"]))
+        model_evidence = [*behavioral["model_evidence"], *transaction["model_evidence"], *remark["model_evidence"]]
 
         repository.upsert_user_identity(tenant.tenant_id, req.user_id, None, None, None, None)
         repository.link_user_device(tenant.tenant_id, req.user_id, req.device_id)
@@ -125,20 +124,18 @@ class FraudEngine:
         reasons = [*behavioral["reasons"], *transaction["reasons"], *remark["reasons"]]
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
         response = ScoreResponse(request_id=request_id, fraud_score=final_score, action=action, reasons=reasons[:5], latency_ms=latency_ms)
-        repository.write_audit_event(tenant.tenant_id, request_id, "transaction", req.user_id, response.fraud_score, response.action, response.reasons, [*behavioral["factors"], *transaction["factors"], *remark["factors"]], req.model_dump())
-        self._queue_case_webhooks(tenant.tenant_id, response, "transaction")
+        self._finalize_decision(tenant, request_id, "transaction", req.user_id, response, [*behavioral["factors"], *transaction["factors"], *remark["factors"]], req.model_dump(), model_evidence)
         return response
 
     async def score_phishing(self, tenant: TenantContext, req: PhishingScoreRequest) -> ScoreResponse:
         start = time.perf_counter()
-        score, reasons, factors = self._phishing_score(tenant.tenant_id, req)
+        score, reasons, factors, model_evidence = self._phishing_score(tenant.tenant_id, req)
         action = self._action_for_score(score)
 
         request_id = str(uuid4())
         latency_ms = round((time.perf_counter() - start) * 1000, 1)
         response = ScoreResponse(request_id=request_id, fraud_score=score, action=action, reasons=reasons, latency_ms=latency_ms)
-        repository.write_audit_event(tenant.tenant_id, request_id, "phishing", None, response.fraud_score, response.action, response.reasons, factors, req.model_dump())
-        self._queue_case_webhooks(tenant.tenant_id, response, "phishing")
+        self._finalize_decision(tenant, request_id, "phishing", None, response, factors, req.model_dump(), model_evidence)
         return response
 
     async def score_session_batch(self, tenant: TenantContext, requests: list[SessionScoreRequest]) -> BulkScoreResponse:
@@ -178,17 +175,31 @@ class FraudEngine:
             "created_at": payload["created_at"],
         }
 
-    async def get_case(self, tenant: TenantContext, request_id: str) -> dict | None:
-        return repository.get_audit_event(tenant.tenant_id, request_id)
+    async def list_case_activity(self, tenant: TenantContext, request_id: str, limit: int = 50) -> list[dict]:
+        return repository.list_case_activity(tenant.tenant_id, request_id, limit)
 
-    async def list_cases(self, tenant: TenantContext, limit: int = 20, action: str | None = None, case_status: str | None = None) -> list[dict]:
-        return repository.list_cases(tenant.tenant_id, limit=limit, action=action, case_status=case_status)
+    async def get_case(self, tenant: TenantContext, request_id: str) -> dict | None:
+        payload = repository.get_audit_event(tenant.tenant_id, request_id)
+        if payload is None:
+            return None
+        payload["shadow_comparison"] = repository.get_shadow_decision(tenant.tenant_id, request_id)
+        payload["activity"] = repository.list_case_activity(tenant.tenant_id, request_id)
+        payload["linked_cases"] = repository.find_linked_cases(tenant.tenant_id, request_id)
+        payload["model_evidence"] = payload.get("request_payload", {}).get("model_evidence", [])
+        payload["request_payload"] = {key: value for key, value in payload.get("request_payload", {}).items() if key != "model_evidence"}
+        return payload
+
+    async def list_cases(self, tenant: TenantContext, limit: int = 20, action: str | None = None, case_status: str | None = None, search: str | None = None) -> list[dict]:
+        return repository.list_cases(tenant.tenant_id, limit=limit, action=action, case_status=case_status, search=search)
 
     async def submit_feedback(self, tenant: TenantContext, request_id: str, label: str, notes: str | None, reported_by: str) -> dict | None:
         return repository.submit_feedback(tenant.tenant_id, request_id, label, notes, reported_by)
 
     async def update_case_status(self, tenant: TenantContext, request_id: str, case_status: str, assigned_to: str | None) -> dict | None:
         return repository.update_case_status(tenant.tenant_id, request_id, case_status, assigned_to)
+
+    async def bulk_update_case_status(self, tenant: TenantContext, request_ids: list[str], case_status: str, assigned_to: str | None) -> dict:
+        return repository.bulk_update_case_status(tenant.tenant_id, request_ids, case_status, assigned_to)
 
     async def dashboard_summary(self, tenant: TenantContext) -> dict:
         return repository.dashboard_summary(tenant.tenant_id)
@@ -254,8 +265,132 @@ class FraudEngine:
     async def list_webhook_endpoints(self, tenant: TenantContext) -> list[dict]:
         return repository.list_webhook_endpoints(tenant.tenant_id)
 
+    async def rotate_webhook_secret(self, tenant: TenantContext, webhook_id: str, secret: str) -> dict | None:
+        return repository.update_webhook_secret(tenant.tenant_id, webhook_id, secret)
+
     async def list_webhook_deliveries(self, tenant: TenantContext, limit: int = 20) -> list[dict]:
         return repository.list_webhook_deliveries(tenant.tenant_id, limit)
+
+    async def list_shadow_decisions(self, tenant: TenantContext, limit: int = 20, route: str | None = None, diverged_only: bool = False) -> list[dict]:
+        return repository.list_shadow_decisions(tenant.tenant_id, limit, route, diverged_only)
+
+    async def get_shadow_decision(self, tenant: TenantContext, request_id: str) -> dict | None:
+        return repository.get_shadow_decision(tenant.tenant_id, request_id)
+
+    async def shadow_summary(self, tenant: TenantContext, limit: int = 20) -> dict:
+        return repository.shadow_summary(tenant.tenant_id, limit)
+
+    async def pilot_report(self, tenant: TenantContext, limit: int = 10) -> dict:
+        return repository.pilot_report(tenant.tenant_id, limit)
+
+    def _finalize_decision(
+        self,
+        tenant: TenantContext,
+        request_id: str,
+        route: str,
+        user_id: str | None,
+        response: ScoreResponse,
+        factors: list[dict],
+        request_payload: dict,
+        model_evidence: list[dict] | None = None,
+    ) -> None:
+        enriched_request_payload = {**request_payload, "model_evidence": model_evidence or []}
+        repository.write_audit_event(
+            tenant.tenant_id,
+            request_id,
+            route,
+            user_id,
+            response.fraud_score,
+            response.action,
+            response.reasons,
+            factors,
+            enriched_request_payload,
+        )
+        shadow = self._shadow_decision(route, response.fraud_score, response.action, factors, enriched_request_payload)
+        repository.write_shadow_decision(
+            tenant.tenant_id,
+            request_id,
+            route,
+            shadow["challenger_version"],
+            response.fraud_score,
+            response.action,
+            shadow["shadow_score"],
+            shadow["shadow_action"],
+            shadow["shadow_reasons"],
+        )
+        self._queue_case_webhooks(tenant.tenant_id, response, route)
+
+    def _shadow_decision(self, route: str, production_score: int, production_action: str, factors: list[dict], request_payload: dict) -> dict[str, object]:
+        signal_impacts = {factor["signal"]: int(factor.get("impact", 0)) for factor in factors}
+        shadow_score = int(production_score)
+        shadow_reasons: list[str] = []
+
+        if route == "session":
+            if signal_impacts.get("new_device", 0):
+                shadow_score += 45
+                shadow_reasons.append("Challenger penalizes first-seen device sessions more aggressively")
+            if signal_impacts.get("ip_country_change", 0):
+                shadow_score += 70
+                shadow_reasons.append("Cross-border login shift triggers stronger challenger friction")
+            if signal_impacts.get("typing_pattern_shift", 0):
+                shadow_score += 35
+                shadow_reasons.append("Behavioral drift weight increased in challenger policy")
+        elif route == "onboard":
+            if signal_impacts.get("shared_device", 0):
+                shadow_score += 60
+                shadow_reasons.append("Shared-device onboarding receives extra challenger weight")
+            if signal_impacts.get("pan_reuse", 0) or signal_impacts.get("shared_phone", 0):
+                shadow_score += 70
+                shadow_reasons.append("Identity reuse patterns escalate faster under challenger rules")
+            if bool(request_payload.get("selfie_check_score", 0) >= 0.7):
+                shadow_score += 55
+                shadow_reasons.append("High selfie manipulation score raises challenger severity")
+            if bool(request_payload.get("kyc_name_match_score", 1) <= 0.75):
+                shadow_score += 40
+                shadow_reasons.append("Low KYC match score pushes challenger toward manual review")
+        elif route == "transaction":
+            if signal_impacts.get("balance_drain", 0):
+                shadow_score += 65
+                shadow_reasons.append("Balance-drain behavior is weighted more heavily by challenger")
+            if signal_impacts.get("shared_payee_graph", 0) or signal_impacts.get("blocked_payee_history", 0):
+                shadow_score += 85
+                shadow_reasons.append("Payee graph risk causes stronger challenger escalation")
+            if signal_impacts.get("pressure_payment_combo", 0):
+                shadow_score += 70
+                shadow_reasons.append("Social-engineering payment language is treated as a stronger block signal")
+        elif route == "phishing":
+            risky_flags = sum(1 for key in ["having_ip_address", "https_token", "submitting_to_email", "statistical_report"] if int(request_payload.get(key, 0)) != 0)
+            if risky_flags:
+                shadow_score += risky_flags * 40
+                shadow_reasons.append("Challenger increases weight on critical phishing infrastructure indicators")
+            if int(request_payload.get("url_length", 0)) >= 75:
+                shadow_score += 35
+                shadow_reasons.append("Very long URLs are scored more aggressively by challenger")
+
+        shadow_score = clamp(shadow_score)
+        shadow_action = self._action_for_score(shadow_score, challenge_threshold=260, block_threshold=660)
+        if not shadow_reasons:
+            shadow_reasons.append("Challenger agreed with production under the current evidence set")
+        if shadow_action == production_action and shadow_score == production_score:
+            shadow_reasons = ["Challenger matched production decision and score"]
+        return {
+            "challenger_version": "challenger_v1",
+            "shadow_score": shadow_score,
+            "shadow_action": shadow_action,
+            "shadow_reasons": shadow_reasons[:4],
+        }
+
+    def _model_evidence(self, component: str, prediction, heuristic_score: int) -> dict:
+        return {
+            "component": component,
+            "model_name": prediction.model_name,
+            "model_used": bool(prediction.model_used),
+            "source": prediction.source,
+            "version_id": prediction.version_id,
+            "artifact_path": prediction.artifact_path,
+            "heuristic_score": int(heuristic_score),
+            "output_score": int(prediction.score),
+        }
 
     def _queue_case_webhooks(self, tenant_id: str, response: ScoreResponse, route: str) -> None:
         if response.action in {"CHALLENGE", "BLOCK"}:
@@ -288,11 +423,12 @@ class FraudEngine:
         model_prediction = model_registry.behavioral_score(tenant_id, features, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
+        model_evidence = [self._model_evidence("behavioral", model_prediction, heuristic_score)]
         if model_prediction.model_used:
             factors.append({"signal": "model:behavioral", "impact": max(1, score // 4), "summary": "Behavioral baseline model scored this session from trained artifacts"})
             if score >= 350 and "Behavioral model consensus risk" not in reasons:
                 reasons.append("Behavioral model consensus risk")
-        return score, reasons or ["No major behavioral anomalies"], factors
+        return score, reasons or ["No major behavioral anomalies"], factors, model_evidence
 
     async def _behavioral_for_transaction(self, tenant_id: str, profile: dict, device_id: str, ip_country: str, velocity: int) -> dict:
         features = BehavioralFeatures(
@@ -304,8 +440,8 @@ class FraudEngine:
             txn_velocity_5min=velocity,
             days_since_last_login=days_since(self._parse_dt(profile["last_login_at"])),
         )
-        score, reasons, factors = self._behavioral_score(tenant_id, features)
-        return {"score": score, "reasons": reasons, "factors": factors}
+        score, reasons, factors, model_evidence = self._behavioral_score(tenant_id, features)
+        return {"score": score, "reasons": reasons, "factors": factors, "model_evidence": model_evidence}
 
     async def _transaction_score(
         self,
@@ -366,11 +502,12 @@ class FraudEngine:
         model_prediction = model_registry.transaction_score(tenant_id, feature_values, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
+        model_evidence = [self._model_evidence("transaction", model_prediction, heuristic_score)]
         if model_prediction.model_used:
             factors.append({"signal": "model:transaction", "impact": max(1, score // 4), "summary": "Transaction baseline model scored this payment from trained artifacts"})
             if score >= 350 and "Transaction model consensus risk" not in reasons:
                 reasons.append("Transaction model consensus risk")
-        return {"score": score, "reasons": reasons or ["No major transaction anomalies"], "factors": factors}
+        return {"score": score, "reasons": reasons or ["No major transaction anomalies"], "factors": factors, "model_evidence": model_evidence}
 
     async def _remark_score(self, tenant_id: str, upi_remark: str, payee_vpa: str, amount_paise: int, first_time_payee: bool) -> dict:
         text = f"{upi_remark} {payee_vpa}".lower()
@@ -388,11 +525,12 @@ class FraudEngine:
         model_prediction = model_registry.remark_score(tenant_id, text, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
+        model_evidence = [self._model_evidence("remark", model_prediction, heuristic_score)]
         if model_prediction.model_used:
             factors.append({"signal": "model:remark", "impact": max(1, score // 4), "summary": "Remark classifier model scored this payment context from trained artifacts"})
             if score >= 350 and "Remark classifier consensus risk" not in reasons:
                 reasons.append("Remark classifier consensus risk")
-        return {"score": score, "reasons": reasons or ["Remark is low risk"], "factors": factors}
+        return {"score": score, "reasons": reasons or ["Remark is low risk"], "factors": factors, "model_evidence": model_evidence}
 
     def _phishing_score(self, tenant_id: str, req: PhishingScoreRequest) -> tuple[int, list[str], list[dict]]:
         feature_values = [float(getattr(req, name)) for name in PHISHING_FEATURE_FIELDS]
@@ -421,13 +559,14 @@ class FraudEngine:
                 "summary": "Phishing feature classifier scored the submitted webpage feature vector",
             })
 
+        model_evidence = [self._model_evidence("phishing_feature", model_prediction, heuristic_score)]
         if score >= 700:
             reasons = ["Phishing feature model indicates a high-risk webpage", "URL feature vector matches known phishing patterns"]
         elif score >= 350:
             reasons = ["URL feature vector appears suspicious", "Feature model recommends additional challenge or review"]
         else:
             reasons = ["URL feature vector is low risk"]
-        return score, reasons, factors
+        return score, reasons, factors, model_evidence
 
     def _identity_score(self, tenant_id: str, req: OnboardRequest, links: dict[str, int]) -> tuple[int, list[str], list[dict]]:
         parts = []
@@ -470,16 +609,17 @@ class FraudEngine:
         model_prediction = model_registry.identity_score(tenant_id, feature_values, heuristic_score)
         score = model_prediction.score
         factors = [{"signal": signal, "impact": impact, "summary": summary} for signal, impact, summary in parts]
+        model_evidence = [self._model_evidence("identity", model_prediction, heuristic_score)]
         if model_prediction.model_used:
             factors.append({"signal": "model:identity", "impact": max(1, score // 4), "summary": "Identity baseline model scored this onboarding from trained artifacts"})
             if score >= 350 and "Identity model consensus risk" not in reasons:
                 reasons.append("Identity model consensus risk")
-        return score, reasons or ["No major onboarding anomalies"], factors
+        return score, reasons or ["No major onboarding anomalies"], factors, model_evidence
 
-    def _action_for_score(self, score: int) -> str:
-        if score <= 300:
+    def _action_for_score(self, score: int, challenge_threshold: int = 300, block_threshold: int = 700) -> str:
+        if score <= challenge_threshold:
             return "ALLOW"
-        if score <= 700:
+        if score <= block_threshold:
             return "CHALLENGE"
         return "BLOCK"
 
@@ -490,6 +630,8 @@ class FraudEngine:
 
 
 engine = FraudEngine()
+
+
 
 
 

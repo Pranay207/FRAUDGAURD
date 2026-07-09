@@ -44,11 +44,16 @@ class JobBus:
         self.publish_job(job["job_id"])
         return job
 
-    def enqueue_retraining(self, tenant_id: str, created_by: str | None, promote_stage: str, activate_after_training: bool) -> dict:
+    def enqueue_retraining(self, tenant_id: str, created_by: str | None, promote_stage: str, activate_after_training: bool, use_feedback_labels: bool = True, minimum_feedback_labels: int = 1) -> dict:
         job = repository.enqueue_job(
             tenant_id,
             "train_models",
-            {"promote_stage": promote_stage, "activate_after_training": activate_after_training},
+            {
+                "promote_stage": promote_stage,
+                "activate_after_training": activate_after_training,
+                "use_feedback_labels": use_feedback_labels,
+                "minimum_feedback_labels": minimum_feedback_labels,
+            },
             created_by=created_by,
             priority=90,
             max_attempts=2,

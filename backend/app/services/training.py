@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import csv
 import json
@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from app.config import get_settings
 from app.services.models import model_registry
+from app.services.transformer_text import TransformerTextClassifier, write_transformer_metadata
 
 
 SAFE_TEXTS = [
@@ -221,6 +222,77 @@ def load_sms_spam_dataset(dataset_path: Path) -> tuple[list[str], list[int]]:
 
 
 
+
+def _train_remark_transformer_if_available(texts: list[str], labels: list[int], artifact_dir: Path) -> dict | None:
+    try:
+        import numpy as np
+        import torch
+        from sklearn.model_selection import train_test_split
+        from transformers import AutoModelForSequenceClassification, AutoTokenizer, Trainer, TrainingArguments
+    except ImportError:
+        return None
+
+    try:
+        train_texts, test_texts, y_train, y_test = train_test_split(
+            texts,
+            np.array(labels),
+            test_size=0.25,
+            random_state=42,
+            stratify=np.array(labels),
+        )
+
+        class TextClassificationDataset(torch.utils.data.Dataset):
+            def __init__(self, tokenizer, texts, labels):
+                self.encodings = tokenizer(list(texts), truncation=True, padding=True, max_length=128)
+                self.labels = list(labels)
+
+            def __len__(self):
+                return len(self.labels)
+
+            def __getitem__(self, index):
+                item = {key: torch.tensor(value[index]) for key, value in self.encodings.items()}
+                item["labels"] = torch.tensor(self.labels[index])
+                return item
+
+        model_id = "distilbert-base-uncased"
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = AutoModelForSequenceClassification.from_pretrained(model_id, num_labels=2)
+        train_dataset = TextClassificationDataset(tokenizer, train_texts, y_train)
+
+        trainer = Trainer(
+            model=model,
+            args=TrainingArguments(
+                output_dir=str(artifact_dir / "trainer_tmp"),
+                overwrite_output_dir=True,
+                num_train_epochs=1,
+                per_device_train_batch_size=8,
+                per_device_eval_batch_size=8,
+                learning_rate=2e-5,
+                save_strategy="no",
+                logging_strategy="no",
+                report_to=[],
+                disable_tqdm=True,
+            ),
+            train_dataset=train_dataset,
+        )
+        trainer.train()
+
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        tokenizer.save_pretrained(artifact_dir)
+        model.save_pretrained(artifact_dir)
+        write_transformer_metadata(artifact_dir, {"model_family": "distilbert", "base_model": model_id, "task": "remark_fraud_text"})
+
+        wrapper = TransformerTextClassifier(artifact_dir)
+        probabilities = wrapper.predict_proba(list(test_texts))[:, 1]
+        predictions = (probabilities >= 0.5).astype(int)
+        return {
+            "artifact_path": str(artifact_dir),
+            "metrics": _build_classification_metrics(y_test, probabilities, predictions),
+            "version_id": str(uuid4()),
+        }
+    except Exception:
+        return None
+
 def _build_classification_metrics(y_true, probabilities, predictions) -> dict[str, float | int]:
     from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, precision_score, recall_score, roc_auc_score
 
@@ -254,6 +326,7 @@ def _write_metrics_summary(report_path: Path, results: dict[str, dict]) -> None:
         },
     }
     report_path.write_text(json.dumps(report_payload, indent=2), encoding="utf-8")
+
 def train_baseline_models() -> dict[str, dict]:
     try:
         import joblib
@@ -370,18 +443,23 @@ def train_baseline_models() -> dict[str, dict]:
             remark_y.append(0)
             remark_texts.append(rng.choice(SCAM_TEXTS))
             remark_y.append(1)
-    X_train, X_test, y_train, y_test = train_test_split(remark_texts, np.array(remark_y), test_size=0.25, random_state=42, stratify=np.array(remark_y))
-    remark_model = Pipeline([("tfidf", TfidfVectorizer(ngram_range=(1, 2))), ("clf", LogisticRegression(max_iter=500, class_weight="balanced"))])
-    remark_model.fit(X_train, y_train)
-    probabilities = remark_model.predict_proba(X_test)[:, 1]
-    predictions = (probabilities >= 0.5).astype(int)
-    artifact_path = artifact_dir / "remark_risk.joblib"
-    joblib.dump(remark_model, artifact_path)
-    results["remark"] = {
-        "artifact_path": str(artifact_path),
-        "metrics": _build_classification_metrics(y_test, probabilities, predictions),
-        "version_id": str(uuid4()),
-    }
+    transformer_artifact_path = artifact_dir / "remark_distilbert"
+    transformer_result = _train_remark_transformer_if_available(remark_texts, remark_y, transformer_artifact_path)
+    if transformer_result is not None:
+        results["remark"] = transformer_result
+    else:
+        X_train, X_test, y_train, y_test = train_test_split(remark_texts, np.array(remark_y), test_size=0.25, random_state=42, stratify=np.array(remark_y))
+        remark_model = Pipeline([("tfidf", TfidfVectorizer(ngram_range=(1, 2))), ("clf", LogisticRegression(max_iter=500, class_weight="balanced"))])
+        remark_model.fit(X_train, y_train)
+        probabilities = remark_model.predict_proba(X_test)[:, 1]
+        predictions = (probabilities >= 0.5).astype(int)
+        artifact_path = artifact_dir / "remark_risk.joblib"
+        joblib.dump(remark_model, artifact_path)
+        results["remark"] = {
+            "artifact_path": str(artifact_path),
+            "metrics": _build_classification_metrics(y_test, probabilities, predictions),
+            "version_id": str(uuid4()),
+        }
 
     if phishing_path is not None:
         phishing_X, phishing_y, _ = load_phishing_feature_dataset(phishing_path)
@@ -509,6 +587,10 @@ def _count_dataset_records(dataset_path: Path) -> int | None:
         with dataset_path.open("r", encoding="utf-8", errors="ignore") as handle:
             return sum(1 for _ in handle if _.strip())
     return None
+
+
+
+
 
 
 

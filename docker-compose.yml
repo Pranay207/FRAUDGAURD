@@ -5,7 +5,7 @@ services:
     build: ./backend
     command: ["python", "scripts/migrate.py"]
     env_file:
-      - ./backend/.env.example
+      - ./backend/.env
     volumes:
       - ./backend/data:/app/data
     depends_on:
@@ -18,7 +18,7 @@ services:
     ports:
       - "8000:8000"
     env_file:
-      - ./backend/.env.example
+      - ./backend/.env
     volumes:
       - ./backend/data:/app/data
     depends_on:
@@ -33,7 +33,7 @@ services:
     build: ./backend
     command: ["python", "scripts/run_worker.py"]
     env_file:
-      - ./backend/.env.example
+      - ./backend/.env
     volumes:
       - ./backend/data:/app/data
     depends_on:
@@ -48,7 +48,7 @@ services:
     image: postgres:16
     environment:
       POSTGRES_USER: fg
-      POSTGRES_PASSWORD: fg
+      POSTGRES_PASSWORD: replace-with-db-password
       POSTGRES_DB: fraudguard
     ports:
       - "5432:5432"

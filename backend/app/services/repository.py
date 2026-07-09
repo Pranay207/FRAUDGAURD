@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import hashlib
 import json
@@ -230,6 +230,43 @@ class FraudRepository:
                 (tenant_id, request_id, route, user_id, fraud_score, action, json.dumps(reasons), json.dumps(factors), json.dumps(request_payload), case_status, now),
             )
             connection.commit()
+        self.write_case_activity(tenant_id, request_id, "case.created", user_id, {"route": route, "fraud_score": fraud_score, "action": action, "reasons": reasons[:3]})
+
+    def write_case_activity(self, tenant_id: str, request_id: str, event_type: str, actor_id: str | None, details: dict[str, Any]) -> dict[str, Any]:
+        activity_id = str(uuid4())
+        now = datetime.now(UTC).isoformat()
+        with get_connection() as connection:
+            connection.execute(
+                "INSERT INTO case_activity (tenant_id, activity_id, request_id, event_type, actor_id, details_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tenant_id, activity_id, request_id, event_type, actor_id, json.dumps(details), now),
+            )
+            connection.commit()
+        return {
+            "activity_id": activity_id,
+            "request_id": request_id,
+            "event_type": event_type,
+            "actor_id": actor_id,
+            "details": details,
+            "created_at": datetime.fromisoformat(now),
+        }
+
+    def list_case_activity(self, tenant_id: str, request_id: str, limit: int = 50) -> list[dict[str, Any]]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT activity_id, request_id, event_type, actor_id, details_json, created_at FROM case_activity WHERE tenant_id = ? AND request_id = ? ORDER BY created_at DESC LIMIT ?",
+                (tenant_id, request_id, limit),
+            ).fetchall()
+        return [
+            {
+                "activity_id": row["activity_id"],
+                "request_id": row["request_id"],
+                "event_type": row["event_type"],
+                "actor_id": row["actor_id"],
+                "details": json.loads(row["details_json"]),
+                "created_at": datetime.fromisoformat(row["created_at"]),
+            }
+            for row in rows
+        ]
 
     def get_audit_event(self, tenant_id: str, request_id: str) -> dict[str, Any] | None:
         with get_connection() as connection:
@@ -239,7 +276,7 @@ class FraudRepository:
             ).fetchone()
         return None if row is None else self._audit_row_to_dict(row)
 
-    def list_cases(self, tenant_id: str, limit: int = 20, action: str | None = None, case_status: str | None = None) -> list[dict[str, Any]]:
+    def list_cases(self, tenant_id: str, limit: int = 20, action: str | None = None, case_status: str | None = None, search: str | None = None) -> list[dict[str, Any]]:
         query = "SELECT a.*, f.label AS feedback_label, f.notes AS feedback_notes FROM audit_events a LEFT JOIN feedback f ON f.tenant_id = a.tenant_id AND f.request_id = a.request_id WHERE a.tenant_id = ?"
         params: list[Any] = [tenant_id]
         if action:
@@ -248,11 +285,66 @@ class FraudRepository:
         if case_status:
             query += " AND a.case_status = ?"
             params.append(case_status)
+        if search:
+            query += " AND (a.request_id LIKE ? OR COALESCE(a.user_id, '') LIKE ?)"
+            needle = f"%{search}%"
+            params.extend([needle, needle])
         query += " ORDER BY a.created_at DESC LIMIT ?"
         params.append(limit)
         with get_connection() as connection:
             rows = connection.execute(query, params).fetchall()
         return [self._audit_row_to_dict(row) for row in rows]
+
+    def find_linked_cases(self, tenant_id: str, request_id: str, limit: int = 5) -> list[dict[str, Any]]:
+        current = self.get_audit_event(tenant_id, request_id)
+        if current is None:
+            return []
+
+        payload = current["request_payload"]
+        current_device = payload.get("device_id") or payload.get("device", {}).get("device_id")
+        current_payee = payload.get("payee_vpa")
+        current_phone = payload.get("phone_hash")
+        current_pan = payload.get("pan_hash")
+        current_user = current.get("user_id")
+
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT a.*, f.label AS feedback_label, f.notes AS feedback_notes FROM audit_events a LEFT JOIN feedback f ON f.tenant_id = a.tenant_id AND f.request_id = a.request_id WHERE a.tenant_id = ? AND a.request_id != ? ORDER BY a.created_at DESC LIMIT 200",
+                (tenant_id, request_id),
+            ).fetchall()
+
+        linked: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._audit_row_to_dict(row)
+            candidate_payload = item["request_payload"]
+            candidate_device = candidate_payload.get("device_id") or candidate_payload.get("device", {}).get("device_id")
+            matched_signals: list[str] = []
+
+            if current_user and item.get("user_id") == current_user:
+                matched_signals.append("shared_user")
+            if current_device and candidate_device == current_device:
+                matched_signals.append("shared_device")
+            if current_payee and candidate_payload.get("payee_vpa") == current_payee:
+                matched_signals.append("shared_payee")
+            if current_phone and candidate_payload.get("phone_hash") == current_phone:
+                matched_signals.append("shared_phone")
+            if current_pan and candidate_payload.get("pan_hash") == current_pan:
+                matched_signals.append("shared_pan")
+
+            if matched_signals:
+                linked.append({
+                    "request_id": item["request_id"],
+                    "route": item["route"],
+                    "action": item["action"],
+                    "fraud_score": item["fraud_score"],
+                    "case_status": item["case_status"],
+                    "assigned_to": item.get("assigned_to"),
+                    "created_at": item["created_at"],
+                    "matched_signals": matched_signals,
+                })
+
+        linked.sort(key=lambda item: (len(item["matched_signals"]), item["fraud_score"]), reverse=True)
+        return linked[:limit]
 
     def submit_feedback(self, tenant_id: str, request_id: str, label: str, notes: str | None, reported_by: str) -> dict[str, Any] | None:
         now = datetime.now(UTC).isoformat()
@@ -265,6 +357,7 @@ class FraudRepository:
                 (tenant_id, request_id, label, notes, reported_by, now),
             )
             connection.commit()
+        self.write_case_activity(tenant_id, request_id, "case.feedback", reported_by, {"label": label, "notes": notes})
         return {"request_id": request_id, "label": label, "notes": notes, "reported_by": reported_by}
 
     def update_case_status(self, tenant_id: str, request_id: str, case_status: str, assigned_to: str | None) -> dict[str, Any] | None:
@@ -274,7 +367,22 @@ class FraudRepository:
                 return None
             connection.execute("UPDATE audit_events SET case_status = ?, assigned_to = ? WHERE tenant_id = ? AND request_id = ?", (case_status, assigned_to, tenant_id, request_id))
             connection.commit()
+        self.write_case_activity(tenant_id, request_id, "case.status_updated", assigned_to, {"case_status": case_status, "assigned_to": assigned_to})
         return {"request_id": request_id, "case_status": case_status, "assigned_to": assigned_to}
+
+    def bulk_update_case_status(self, tenant_id: str, request_ids: list[str], case_status: str, assigned_to: str | None) -> dict[str, Any]:
+        updated_ids: list[str] = []
+        with get_connection() as connection:
+            for request_id in request_ids:
+                exists = connection.execute("SELECT request_id FROM audit_events WHERE tenant_id = ? AND request_id = ?", (tenant_id, request_id)).fetchone()
+                if exists is None:
+                    continue
+                connection.execute("UPDATE audit_events SET case_status = ?, assigned_to = ? WHERE tenant_id = ? AND request_id = ?", (case_status, assigned_to, tenant_id, request_id))
+                updated_ids.append(request_id)
+            connection.commit()
+        for request_id in updated_ids:
+            self.write_case_activity(tenant_id, request_id, "case.status_bulk_updated", assigned_to, {"case_status": case_status, "assigned_to": assigned_to, "bulk": True})
+        return {"updated": len(updated_ids), "request_ids": updated_ids, "case_status": case_status, "assigned_to": assigned_to}
 
     def dashboard_summary(self, tenant_id: str) -> dict[str, Any]:
         with get_connection() as connection:
@@ -326,12 +434,27 @@ class FraudRepository:
         with get_connection() as connection:
             connection.execute("INSERT INTO webhook_endpoints (tenant_id, webhook_id, event_type, url, secret, is_active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)", (tenant_id, webhook_id, event_type, url, secret, now))
             connection.commit()
-        return {"webhook_id": webhook_id, "event_type": event_type, "url": url, "is_active": True, "created_at": datetime.fromisoformat(now)}
+        return {"webhook_id": webhook_id, "event_type": event_type, "url": url, "has_secret": bool(secret), "is_active": True, "created_at": datetime.fromisoformat(now)}
+
+    def update_webhook_secret(self, tenant_id: str, webhook_id: str, secret: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT event_type, url, is_active, created_at FROM webhook_endpoints WHERE tenant_id = ? AND webhook_id = ?",
+                (tenant_id, webhook_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE webhook_endpoints SET secret = ? WHERE tenant_id = ? AND webhook_id = ?",
+                (secret, tenant_id, webhook_id),
+            )
+            connection.commit()
+        return {"webhook_id": webhook_id, "event_type": row["event_type"], "url": row["url"], "has_secret": True, "is_active": bool(row["is_active"]), "created_at": datetime.fromisoformat(row["created_at"])}
 
     def list_webhook_endpoints(self, tenant_id: str) -> list[dict[str, Any]]:
         with get_connection() as connection:
             rows = connection.execute("SELECT * FROM webhook_endpoints WHERE tenant_id = ? ORDER BY created_at DESC", (tenant_id,)).fetchall()
-        return [{"webhook_id": row["webhook_id"], "event_type": row["event_type"], "url": row["url"], "is_active": bool(row["is_active"]), "created_at": datetime.fromisoformat(row["created_at"])} for row in rows]
+        return [{"webhook_id": row["webhook_id"], "event_type": row["event_type"], "url": row["url"], "has_secret": bool(row["secret"]), "is_active": bool(row["is_active"]), "created_at": datetime.fromisoformat(row["created_at"])} for row in rows]
 
     def enqueue_webhook_deliveries(self, tenant_id: str, event_type: str, request_id: str, payload: dict[str, Any]) -> None:
         attempted_at = datetime.now(UTC).isoformat()
@@ -533,6 +656,24 @@ class FraudRepository:
             ).fetchone()
         return dict(row) if row else None
 
+    def get_analyst_by_id(self, tenant_id: str, analyst_id: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT analyst_id, email, full_name, role, is_active, created_at, last_login_at FROM analyst_users WHERE tenant_id = ? AND analyst_id = ?",
+                (tenant_id, analyst_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "analyst_id": row["analyst_id"],
+            "email": row["email"],
+            "full_name": row["full_name"],
+            "role": row["role"],
+            "is_active": bool(row["is_active"]),
+            "created_at": datetime.fromisoformat(row["created_at"]),
+            "last_login_at": datetime.fromisoformat(row["last_login_at"]) if row["last_login_at"] else None,
+        }
+
     def list_analyst_users(self, tenant_id: str) -> list[dict[str, Any]]:
         with get_connection() as connection:
             rows = connection.execute(
@@ -561,6 +702,21 @@ class FraudRepository:
             )
             connection.commit()
 
+    def update_analyst_status(self, tenant_id: str, analyst_id: str, is_active: bool) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM analyst_users WHERE tenant_id = ? AND analyst_id = ?",
+                (tenant_id, analyst_id),
+            ).fetchone()
+            if row is None:
+                return None
+            connection.execute(
+                "UPDATE analyst_users SET is_active = ? WHERE tenant_id = ? AND analyst_id = ?",
+                (int(is_active), tenant_id, analyst_id),
+            )
+            connection.commit()
+        return self.get_analyst_by_id(tenant_id, analyst_id)
+
     def write_security_audit_event(self, tenant_id: str, event_type: str, actor_id: str | None, actor_role: str | None, details: dict[str, Any]) -> dict[str, Any]:
         event_id = str(uuid4())
         now = datetime.now(UTC).isoformat()
@@ -572,12 +728,19 @@ class FraudRepository:
             connection.commit()
         return {"event_id": event_id, "event_type": event_type, "actor_id": actor_id, "actor_role": actor_role, "details": details, "created_at": datetime.fromisoformat(now)}
 
-    def list_security_audit_events(self, tenant_id: str, limit: int = 100) -> list[dict[str, Any]]:
+    def list_security_audit_events(self, tenant_id: str, limit: int = 100, event_type: str | None = None, actor_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT event_id, event_type, actor_id, actor_role, details_json, created_at FROM security_audit_events WHERE tenant_id = ?"
+        params: list[Any] = [tenant_id]
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        if actor_id:
+            query += " AND actor_id = ?"
+            params.append(actor_id)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
         with get_connection() as connection:
-            rows = connection.execute(
-                "SELECT event_id, event_type, actor_id, actor_role, details_json, created_at FROM security_audit_events WHERE tenant_id = ? ORDER BY created_at DESC LIMIT ?",
-                (tenant_id, limit),
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return [
             {
                 "event_id": row["event_id"],
@@ -693,6 +856,25 @@ class FraudRepository:
             connection.commit()
         return {"status": status, "attempts": attempts, "max_attempts": max_attempts}
 
+    def feedback_training_summary(self, tenant_id: str) -> dict[str, Any]:
+        with get_connection() as connection:
+            total = connection.execute(
+                "SELECT COUNT(*) AS count FROM feedback WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()["count"]
+            rows = connection.execute(
+                "SELECT label, COUNT(*) AS count FROM feedback WHERE tenant_id = ? GROUP BY label ORDER BY count DESC, label ASC",
+                (tenant_id,),
+            ).fetchall()
+        by_label = {row["label"]: int(row["count"]) for row in rows}
+        return {
+            "total_feedback_labels": int(total),
+            "by_label": by_label,
+            "confirmed_fraud_labels": by_label.get("CONFIRMED_FRAUD", 0),
+            "false_positive_labels": by_label.get("FALSE_POSITIVE", 0),
+            "suspicious_but_allowed_labels": by_label.get("SUSPICIOUS_BUT_ALLOWED", 0),
+        }
+
     def monitoring_snapshot(self, tenant_id: str) -> dict[str, Any]:
         with get_connection() as connection:
             queued_jobs = connection.execute("SELECT COUNT(*) AS count FROM jobs WHERE tenant_id = ? AND status IN ('QUEUED', 'RETRYING')", (tenant_id,)).fetchone()["count"]
@@ -738,6 +920,164 @@ class FraudRepository:
             return None
         return {"connector_id": row["connector_id"], "connector_type": row["connector_type"], "route": row["route"], "source_path": row["source_path"], "config": json.loads(row["config_json"]), "is_active": bool(row["is_active"]), "created_by": row["created_by"], "created_at": datetime.fromisoformat(row["created_at"]), "last_run_at": datetime.fromisoformat(row["last_run_at"]) if row["last_run_at"] else None}
 
+    def write_shadow_decision(
+        self,
+        tenant_id: str,
+        request_id: str,
+        route: str,
+        challenger_version: str,
+        production_score: int,
+        production_action: str,
+        shadow_score: int,
+        shadow_action: str,
+        shadow_reasons: list[str],
+    ) -> None:
+        now = datetime.now(UTC).isoformat()
+        delta_score = int(shadow_score) - int(production_score)
+        diverged = int(production_action != shadow_action)
+        with get_connection() as connection:
+            connection.execute(
+                """
+                INSERT INTO shadow_decisions (
+                    tenant_id, request_id, route, challenger_version, production_score, production_action,
+                    shadow_score, shadow_action, delta_score, diverged, shadow_reasons_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(tenant_id, request_id) DO UPDATE SET
+                    route = excluded.route,
+                    challenger_version = excluded.challenger_version,
+                    production_score = excluded.production_score,
+                    production_action = excluded.production_action,
+                    shadow_score = excluded.shadow_score,
+                    shadow_action = excluded.shadow_action,
+                    delta_score = excluded.delta_score,
+                    diverged = excluded.diverged,
+                    shadow_reasons_json = excluded.shadow_reasons_json,
+                    created_at = excluded.created_at
+                """,
+                (
+                    tenant_id,
+                    request_id,
+                    route,
+                    challenger_version,
+                    production_score,
+                    production_action,
+                    shadow_score,
+                    shadow_action,
+                    delta_score,
+                    diverged,
+                    json.dumps(shadow_reasons),
+                    now,
+                ),
+            )
+            connection.commit()
+
+    def list_shadow_decisions(self, tenant_id: str, limit: int = 20, route: str | None = None, diverged_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM shadow_decisions WHERE tenant_id = ?"
+        params: list[Any] = [tenant_id]
+        if route:
+            query += " AND route = ?"
+            params.append(route)
+        if diverged_only:
+            query += " AND diverged = 1"
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with get_connection() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [self._shadow_row_to_dict(row) for row in rows]
+
+    def get_shadow_decision(self, tenant_id: str, request_id: str) -> dict[str, Any] | None:
+        with get_connection() as connection:
+            row = connection.execute(
+                "SELECT * FROM shadow_decisions WHERE tenant_id = ? AND request_id = ?",
+                (tenant_id, request_id),
+            ).fetchone()
+        return None if row is None else self._shadow_row_to_dict(row)
+
+    def shadow_summary(self, tenant_id: str, limit: int = 20) -> dict[str, Any]:
+        with get_connection() as connection:
+            rows = connection.execute(
+                "SELECT * FROM shadow_decisions WHERE tenant_id = ? ORDER BY created_at DESC",
+                (tenant_id,),
+            ).fetchall()
+        if not rows:
+            return {
+                "challenger_version": "challenger_v1",
+                "total": 0,
+                "diverged": 0,
+                "divergence_rate": 0.0,
+                "route_breakdown": [],
+                "recent_drifts": [],
+            }
+
+        route_buckets: dict[str, dict[str, float]] = {}
+        diverged = 0
+        for row in rows:
+            bucket = route_buckets.setdefault(row["route"], {"route": row["route"], "total": 0, "diverged": 0, "delta_sum": 0.0})
+            bucket["total"] += 1
+            bucket["delta_sum"] += float(row["delta_score"])
+            if int(row["diverged"]):
+                bucket["diverged"] += 1
+                diverged += 1
+        route_breakdown = [
+            {
+                "route": bucket["route"],
+                "total": int(bucket["total"]),
+                "diverged": int(bucket["diverged"]),
+                "divergence_rate": round(float(bucket["diverged"]) / max(float(bucket["total"]), 1.0), 4),
+                "avg_score_delta": round(float(bucket["delta_sum"]) / max(float(bucket["total"]), 1.0), 1),
+            }
+            for bucket in route_buckets.values()
+        ]
+        route_breakdown.sort(key=lambda item: (item["diverged"], item["total"]), reverse=True)
+        recent_drifts = [self._shadow_row_to_dict(row) for row in rows if int(row["diverged"])]
+        return {
+            "challenger_version": rows[0]["challenger_version"],
+            "total": len(rows),
+            "diverged": diverged,
+            "divergence_rate": round(diverged / max(len(rows), 1), 4),
+            "route_breakdown": route_breakdown,
+            "recent_drifts": recent_drifts[:limit],
+        }
+
+    def pilot_report(self, tenant_id: str, limit: int = 10) -> dict[str, Any]:
+        summary = self.shadow_summary(tenant_id, limit)
+        with get_connection() as connection:
+            open_cases = connection.execute(
+                "SELECT COUNT(*) AS count FROM audit_events WHERE tenant_id = ? AND case_status != 'RESOLVED'",
+                (tenant_id,),
+            ).fetchone()["count"]
+            labeled_cases = connection.execute(
+                "SELECT COUNT(*) AS count FROM feedback WHERE tenant_id = ?",
+                (tenant_id,),
+            ).fetchone()["count"]
+            production_blocks = connection.execute(
+                "SELECT COUNT(*) AS count FROM shadow_decisions WHERE tenant_id = ? AND production_action = 'BLOCK'",
+                (tenant_id,),
+            ).fetchone()["count"]
+            challenger_blocks = connection.execute(
+                "SELECT COUNT(*) AS count FROM shadow_decisions WHERE tenant_id = ? AND shadow_action = 'BLOCK'",
+                (tenant_id,),
+            ).fetchone()["count"]
+        incremental_blocks = int(challenger_blocks) - int(production_blocks)
+        notes = [
+            f"Shadow challenger reviewed {summary['total']} events against production decisions.",
+            f"Divergence rate is {round(summary['divergence_rate'] * 100, 2)}% across monitored routes.",
+            f"Challenger would add {incremental_blocks} extra blocks versus production in the current sample.",
+        ]
+        return {
+            "generated_at": datetime.now(UTC),
+            "challenger_version": summary["challenger_version"],
+            "compared_events": summary["total"],
+            "divergence_rate": summary["divergence_rate"],
+            "production_blocks": int(production_blocks),
+            "challenger_blocks": int(challenger_blocks),
+            "incremental_blocks": incremental_blocks,
+            "open_cases": int(open_cases),
+            "labeled_cases": int(labeled_cases),
+            "notes": notes,
+            "recent_drifts": summary["recent_drifts"][:limit],
+        }
+
     def mark_connector_run(self, tenant_id: str, connector_id: str) -> None:
         now = datetime.now(UTC).isoformat()
         with get_connection() as connection:
@@ -746,6 +1086,21 @@ class FraudRepository:
                 (now, tenant_id, connector_id),
             )
             connection.commit()
+    def _shadow_row_to_dict(self, row: Any) -> dict[str, Any]:
+        return {
+            "request_id": row["request_id"],
+            "route": row["route"],
+            "challenger_version": row["challenger_version"],
+            "production_score": int(row["production_score"]),
+            "production_action": row["production_action"],
+            "shadow_score": int(row["shadow_score"]),
+            "shadow_action": row["shadow_action"],
+            "delta_score": int(row["delta_score"]),
+            "diverged": bool(row["diverged"]),
+            "shadow_reasons": json.loads(row["shadow_reasons_json"]),
+            "created_at": datetime.fromisoformat(row["created_at"]),
+        }
+
     def _audit_row_to_dict(self, row: Any) -> dict[str, Any]:
         return {
             "request_id": row["request_id"],
@@ -761,10 +1116,14 @@ class FraudRepository:
             "feedback_notes": row["feedback_notes"],
             "case_status": row["case_status"],
             "assigned_to": row["assigned_to"],
+            "activity": [],
         }
 
 
 repository = FraudRepository()
+
+
+
 
 
 

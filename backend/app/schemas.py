@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from datetime import datetime
 from typing import Literal
@@ -148,6 +148,41 @@ class CaseListResponse(BaseModel):
     items: list[CaseSummary]
 
 
+class CaseActivityRecord(BaseModel):
+    activity_id: str
+    request_id: str
+    event_type: str
+    actor_id: str | None = None
+    details: dict
+    created_at: datetime
+
+
+class CaseActivityListResponse(BaseModel):
+    items: list[CaseActivityRecord]
+
+
+class LinkedCaseRecord(BaseModel):
+    request_id: str
+    route: str
+    action: Action
+    fraud_score: int
+    case_status: CaseStatus
+    assigned_to: str | None = None
+    created_at: datetime
+    matched_signals: list[str] = Field(default_factory=list)
+
+
+class ModelEvidenceRecord(BaseModel):
+    component: str
+    model_name: str
+    model_used: bool
+    source: str
+    version_id: str | None = None
+    artifact_path: str | None = None
+    heuristic_score: int
+    output_score: int
+
+
 class CaseDetailResponse(BaseModel):
     request_id: str
     route: str
@@ -162,6 +197,10 @@ class CaseDetailResponse(BaseModel):
     feedback_notes: str | None = None
     case_status: CaseStatus = "OPEN"
     assigned_to: str | None = None
+    shadow_comparison: ShadowDecisionRecord | None = None
+    activity: list[CaseActivityRecord] = Field(default_factory=list)
+    linked_cases: list[LinkedCaseRecord] = Field(default_factory=list)
+    model_evidence: list[ModelEvidenceRecord] = Field(default_factory=list)
 
 
 class FeedbackRequest(BaseModel):
@@ -188,6 +227,19 @@ class CaseStatusResponse(BaseModel):
     assigned_to: str | None = None
 
 
+class BulkCaseStatusRequest(BaseModel):
+    request_ids: list[str] = Field(min_length=1)
+    case_status: CaseStatus
+    assigned_to: str | None = None
+
+
+class BulkCaseStatusResponse(BaseModel):
+    updated: int
+    request_ids: list[str]
+    case_status: CaseStatus
+    assigned_to: str | None = None
+
+
 class MetricCard(BaseModel):
     label: str
     value: str
@@ -198,6 +250,55 @@ class DashboardSummary(BaseModel):
     metrics: list[MetricCard]
     recent_cases: list[CaseSummary]
     top_signals: list[dict]
+
+
+class ShadowDecisionRecord(BaseModel):
+    request_id: str
+    route: str
+    challenger_version: str | None = None
+    production_score: int
+    production_action: Action
+    shadow_score: int
+    shadow_action: Action
+    delta_score: int
+    diverged: bool
+    shadow_reasons: list[str]
+    created_at: datetime
+
+
+class ShadowDecisionListResponse(BaseModel):
+    items: list[ShadowDecisionRecord]
+
+
+class ShadowRouteSummary(BaseModel):
+    route: str
+    total: int
+    diverged: int
+    divergence_rate: float
+    avg_score_delta: float
+
+
+class ShadowSummaryResponse(BaseModel):
+    challenger_version: str
+    total: int
+    diverged: int
+    divergence_rate: float
+    route_breakdown: list[ShadowRouteSummary]
+    recent_drifts: list[ShadowDecisionRecord]
+
+
+class PilotReportResponse(BaseModel):
+    generated_at: datetime
+    challenger_version: str
+    compared_events: int
+    divergence_rate: float
+    production_blocks: int
+    challenger_blocks: int
+    incremental_blocks: int
+    open_cases: int
+    labeled_cases: int
+    notes: list[str]
+    recent_drifts: list[ShadowDecisionRecord]
 
 
 class SeedResponse(BaseModel):
@@ -313,10 +414,15 @@ class WebhookEndpointCreateRequest(BaseModel):
     secret: str | None = None
 
 
+class WebhookSecretRotateRequest(BaseModel):
+    secret: str = Field(min_length=8)
+
+
 class WebhookEndpointResponse(BaseModel):
     webhook_id: str
     event_type: str
     url: str
+    has_secret: bool = False
     is_active: bool
     created_at: datetime
 
@@ -359,6 +465,10 @@ class AnalystCreateRequest(BaseModel):
     password: str = Field(min_length=12)
     full_name: str = Field(min_length=2)
     role: Literal["admin", "analyst", "viewer"]
+
+
+class AnalystStatusUpdateRequest(BaseModel):
+    is_active: bool
 
 
 class AnalystUserResponse(BaseModel):
@@ -411,6 +521,8 @@ class JobResponse(BaseModel):
 class RetrainRequest(BaseModel):
     promote_stage: str = "candidate"
     activate_after_training: bool = False
+    use_feedback_labels: bool = True
+    minimum_feedback_labels: int = Field(default=1, ge=0, le=100000)
 
 
 class ConnectorCreateRequest(BaseModel):
@@ -450,6 +562,18 @@ class MonitoringSnapshotResponse(BaseModel):
     model_versions: int
 
 
+class SecurityPostureFinding(BaseModel):
+    id: str
+    severity: str
+    message: str
+
+
+class SecurityPostureResponse(BaseModel):
+    status: str
+    highest_severity: str
+    findings: list[SecurityPostureFinding]
+
+
 class SecurityAuditEventResponse(BaseModel):
     event_id: str
     event_type: str
@@ -457,4 +581,6 @@ class SecurityAuditEventResponse(BaseModel):
     actor_role: str | None = None
     details: dict
     created_at: datetime
+
+
 

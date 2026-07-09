@@ -1,4 +1,4 @@
-﻿<!doctype html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
@@ -102,8 +102,19 @@
                   <option value="INVESTIGATING">Investigating</option>
                   <option value="RESOLVED">Resolved</option>
                 </select>
+                <input id="caseSearch" placeholder="Search request or user" />
+                <input id="bulkAssignee" placeholder="Bulk assignee" />
+                <select id="bulkCaseStatus">
+                  <option value="OPEN">Mark Open</option>
+                  <option value="INVESTIGATING">Mark Investigating</option>
+                  <option value="RESOLVED">Mark Resolved</option>
+                </select>
+                <button id="applyBulkCasesBtn" type="button" class="ghost small">Apply Bulk</button>
+                <button id="clearCaseSelectionBtn" type="button" class="ghost small">Clear</button>
+                <button id="exportCasesBtn" type="button" class="ghost small">Export Queue</button>
               </div>
             </div>
+            <div id="caseQueueStats" class="signal-list"></div>
             <div id="cases" class="case-list"></div>
           </article>
 
@@ -159,6 +170,14 @@
                   <div id="detailFactors" class="signal-list"></div>
                 </div>
               </div>
+              <div class="payload-block">
+                <p class="muted">Shadow Comparison</p>
+                <div id="detailShadow" class="signal-list"></div>
+              </div>
+              <div class="payload-block">
+                <p class="muted">Model Evidence</p>
+                <div id="detailModelEvidence" class="signal-list"></div>
+              </div>
               <div class="ops-row">
                 <select id="caseStatus">
                   <option value="OPEN">Open</option>
@@ -167,10 +186,19 @@
                 </select>
                 <input id="caseAssignee" placeholder="Assigned analyst" />
                 <button id="saveStatusBtn" type="button">Save Case</button>
+                <button id="exportCaseBtn" type="button" class="ghost">Export Case</button>
               </div>
               <div class="payload-block">
                 <p class="muted">Request Payload</p>
                 <pre id="detailPayload"></pre>
+              </div>
+              <div class="payload-block">
+                <p class="muted">Case Activity</p>
+                <div id="detailActivity" class="signal-list"></div>
+              </div>
+              <div class="payload-block">
+                <p class="muted">Linked Cases</p>
+                <div id="detailLinkedCases" class="signal-list"></div>
               </div>
               <form id="feedbackForm" class="feedback-form">
                 <select id="feedbackLabel">
@@ -235,6 +263,33 @@
               </div>
             </div>
             <div id="modelSummary" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Challenger analysis</p>
+                <h3>Shadow Mode</h3>
+              </div>
+            </div>
+            <div id="shadowSummary" class="signal-list"></div>
+            <div class="section-head top-gap">
+              <div>
+                <p class="eyebrow subtle">Drift log</p>
+                <h3>Recent Shadow Decisions</h3>
+              </div>
+            </div>
+            <div id="shadowDecisions" class="signal-list"></div>
+          </article>
+
+          <article class="panel stack-panel">
+            <div class="section-head">
+              <div>
+                <p class="eyebrow subtle">Pilot readiness</p>
+                <h3>Pilot Report</h3>
+              </div>
+            </div>
+            <div id="pilotReport" class="signal-list"></div>
           </article>
 
           <article class="panel stack-panel">
@@ -361,5 +416,9 @@
     <script src="/dashboard/assets/app.js"></script>
   </body>
 </html>
+
+
+
+
 
 

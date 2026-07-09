@@ -1,5 +1,6 @@
-﻿import json
+import json
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query
@@ -10,6 +11,7 @@ from app.config import get_settings
 from app.db import get_connection, init_db
 from app.schemas import (
     AnalystCreateRequest,
+    AnalystStatusUpdateRequest,
     AnalystUserResponse,
     ApiKeyCreateRequest,
     ApiKeyCreateResponse,
@@ -17,6 +19,9 @@ from app.schemas import (
     AuthBootstrapRequest,
     AuthTokenResponse,
     BulkScoreResponse,
+    BulkCaseStatusRequest,
+    BulkCaseStatusResponse,
+    CaseActivityListResponse,
     CaseDetailResponse,
     CaseListResponse,
     CaseStatusRequest,
@@ -43,12 +48,17 @@ from app.schemas import (
     OnboardRequest,
     PhishingBatchRequest,
     PhishingScoreRequest,
+    PilotReportResponse,
     RetrainRequest,
     ScoreResponse,
     SeedResponse,
     SecurityAuditEventResponse,
+    SecurityPostureResponse,
     SessionBatchRequest,
     SessionScoreRequest,
+    ShadowDecisionListResponse,
+    ShadowDecisionRecord,
+    ShadowSummaryResponse,
     TenantResponse,
     TrainModelsResponse,
     TransactionBatchRequest,
@@ -56,6 +66,7 @@ from app.schemas import (
     WebhookDeliveryResponse,
     WebhookDispatchResponse,
     WebhookEndpointCreateRequest,
+    WebhookSecretRotateRequest,
     WebhookEndpointResponse,
 )
 from app.security import (
@@ -73,6 +84,7 @@ from app.security import (
 )
 from app.services.monitoring import monitoring
 from app.services.queue import job_bus
+from app.services.reporting import write_case_activity_csv, write_case_queue_csv, write_case_report_markdown, write_pilot_report_markdown, write_security_audit_csv, write_shadow_decision_csv
 from app.services.repository import repository
 from app.services.scoring import engine
 from app.services.training import get_dataset_inventory, train_baseline_models
@@ -221,6 +233,17 @@ async def create_analyst(req: AnalystCreateRequest, principal: TenantContext = D
     password_hash, password_salt = hash_password(req.password)
     analyst = repository.create_analyst_user(principal.tenant_id, req.email, req.full_name, req.role, password_hash, password_salt, principal.actor_id)
     repository.write_security_audit_event(principal.tenant_id, "analyst.created", principal.actor_id, principal.role, {"email": req.email, "role": req.role})
+    return AnalystUserResponse(**analyst)
+
+
+@app.patch("/v1/ops/analysts/{analyst_id}/status", response_model=AnalystUserResponse)
+async def update_analyst_status(analyst_id: str, req: AnalystStatusUpdateRequest, principal: TenantContext = Depends(verify_service_or_admin)) -> AnalystUserResponse:
+    if principal.actor_type == "analyst" and principal.actor_id == analyst_id and not req.is_active:
+        raise HTTPException(status_code=400, detail="cannot deactivate current analyst session")
+    analyst = repository.update_analyst_status(principal.tenant_id, analyst_id, req.is_active)
+    if analyst is None:
+        raise HTTPException(status_code=404, detail="analyst not found")
+    repository.write_security_audit_event(principal.tenant_id, "analyst.status_updated", principal.actor_id, principal.role, {"analyst_id": analyst_id, "is_active": req.is_active})
     return AnalystUserResponse(**analyst)
 
 
@@ -380,10 +403,81 @@ async def ops_summary(principal: TenantContext = Depends(OPS_ROLES)) -> Dashboar
     return DashboardSummary(**await engine.dashboard_summary(principal))
 
 
+@app.get("/v1/ops/shadow-decisions", response_model=ShadowDecisionListResponse)
+async def ops_shadow_decisions(limit: int = Query(default=20, ge=1, le=100), route: str | None = Query(default=None), diverged_only: bool = Query(default=False), principal: TenantContext = Depends(OPS_ROLES)) -> ShadowDecisionListResponse:
+    items = await engine.list_shadow_decisions(principal, limit, route, diverged_only)
+    return ShadowDecisionListResponse(items=[ShadowDecisionRecord(**item) for item in items])
+
+
+@app.get("/v1/ops/shadow-decisions/export")
+async def export_shadow_decisions(limit: int = Query(default=100, ge=1, le=1000), route: str | None = Query(default=None), diverged_only: bool = Query(default=False), principal: TenantContext = Depends(OPS_ROLES)) -> FileResponse:
+    items = await engine.list_shadow_decisions(principal, limit, route, diverged_only)
+    output_path = write_shadow_decision_csv(principal.tenant_id, items)
+    return FileResponse(output_path, media_type="text/csv; charset=utf-8", filename=output_path.name)
+
+
+@app.get("/v1/ops/shadow-decisions/{request_id}", response_model=ShadowDecisionRecord)
+async def ops_shadow_decision_detail(request_id: str, principal: TenantContext = Depends(OPS_ROLES)) -> ShadowDecisionRecord:
+    payload = await engine.get_shadow_decision(principal, request_id)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="shadow decision not found")
+    return ShadowDecisionRecord(**payload)
+
+
+@app.get("/v1/ops/shadow-summary", response_model=ShadowSummaryResponse)
+async def ops_shadow_summary(limit: int = Query(default=20, ge=1, le=100), principal: TenantContext = Depends(OPS_ROLES)) -> ShadowSummaryResponse:
+    return ShadowSummaryResponse(**await engine.shadow_summary(principal, limit))
+
+
+@app.get("/v1/ops/pilot-report", response_model=PilotReportResponse)
+async def ops_pilot_report(limit: int = Query(default=10, ge=1, le=50), principal: TenantContext = Depends(OPS_ROLES)) -> PilotReportResponse:
+    return PilotReportResponse(**await engine.pilot_report(principal, limit))
+
+
+@app.get("/v1/ops/pilot-report/export")
+async def export_pilot_report(limit: int = Query(default=10, ge=1, le=50), principal: TenantContext = Depends(OPS_ROLES)) -> FileResponse:
+    payload = await engine.pilot_report(principal, limit)
+    output_path = write_pilot_report_markdown(principal.tenant_id, payload)
+    return FileResponse(output_path, media_type="text/markdown; charset=utf-8", filename=output_path.name)
+
 @app.get("/v1/ops/cases", response_model=CaseListResponse)
-async def list_cases(limit: int = Query(default=20, ge=1, le=100), action: str | None = Query(default=None), case_status: str | None = Query(default=None), principal: TenantContext = Depends(OPS_ROLES)) -> CaseListResponse:
-    cases = await engine.list_cases(principal, limit=limit, action=action, case_status=case_status)
+async def list_cases(limit: int = Query(default=20, ge=1, le=100), action: str | None = Query(default=None), case_status: str | None = Query(default=None), search: str | None = Query(default=None), principal: TenantContext = Depends(OPS_ROLES)) -> CaseListResponse:
+    cases = await engine.list_cases(principal, limit=limit, action=action, case_status=case_status, search=search)
     return CaseListResponse(items=cases)
+
+
+@app.get("/v1/ops/cases/export")
+async def export_case_queue(limit: int = Query(default=100, ge=1, le=1000), action: str | None = Query(default=None), case_status: str | None = Query(default=None), search: str | None = Query(default=None), principal: TenantContext = Depends(OPS_ROLES)) -> FileResponse:
+    cases = await engine.list_cases(principal, limit=limit, action=action, case_status=case_status, search=search)
+    for item in cases:
+        item["shadow_comparison"] = repository.get_shadow_decision(principal.tenant_id, item["request_id"])
+    output_path = write_case_queue_csv(principal.tenant_id, cases)
+    return FileResponse(output_path, media_type="text/csv; charset=utf-8", filename=output_path.name)
+
+@app.get("/v1/ops/cases/{request_id}/activity", response_model=CaseActivityListResponse)
+async def case_activity(request_id: str, limit: int = Query(default=50, ge=1, le=200), principal: TenantContext = Depends(OPS_ROLES)) -> CaseActivityListResponse:
+    items = await engine.list_case_activity(principal, request_id, limit)
+    return CaseActivityListResponse(items=items)
+
+
+@app.get("/v1/ops/cases/{request_id}/activity/export")
+async def export_case_activity(request_id: str, limit: int = Query(default=200, ge=1, le=1000), principal: TenantContext = Depends(OPS_ROLES)) -> FileResponse:
+    items = await engine.list_case_activity(principal, request_id, limit)
+    output_path = write_case_activity_csv(principal.tenant_id, request_id, items)
+    return FileResponse(output_path, media_type="text/csv; charset=utf-8", filename=output_path.name)
+
+@app.get("/v1/ops/cases/{request_id}/export")
+async def export_case_report(request_id: str, principal: TenantContext = Depends(OPS_ROLES)) -> FileResponse:
+    case = await engine.get_case(principal, request_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="request_id not found")
+    output_path = write_case_report_markdown(principal.tenant_id, case)
+    return FileResponse(output_path, media_type="text/markdown; charset=utf-8", filename=output_path.name)
+
+@app.post("/v1/ops/cases/bulk-status", response_model=BulkCaseStatusResponse)
+async def bulk_update_case_status(req: BulkCaseStatusRequest, principal: TenantContext = Depends(MUTATION_ROLES)) -> BulkCaseStatusResponse:
+    payload = await engine.bulk_update_case_status(principal, req.request_ids, req.case_status, req.assigned_to)
+    return BulkCaseStatusResponse(**payload)
 
 
 @app.get("/v1/ops/cases/{request_id}", response_model=CaseDetailResponse)
@@ -422,6 +516,15 @@ async def list_webhooks(principal: TenantContext = Depends(OPS_ROLES)) -> list[W
     return [WebhookEndpointResponse(**item) for item in await engine.list_webhook_endpoints(principal)]
 
 
+@app.patch("/v1/ops/webhooks/{webhook_id}/secret", response_model=WebhookEndpointResponse)
+async def rotate_webhook_secret(webhook_id: str, req: WebhookSecretRotateRequest, principal: TenantContext = Depends(verify_service_or_admin)) -> WebhookEndpointResponse:
+    payload = await engine.rotate_webhook_secret(principal, webhook_id, req.secret)
+    if payload is None:
+        raise HTTPException(status_code=404, detail="webhook not found")
+    repository.write_security_audit_event(principal.tenant_id, "webhook.secret_rotated", principal.actor_id, principal.role, {"webhook_id": webhook_id})
+    return WebhookEndpointResponse(**payload)
+
+
 @app.get("/v1/ops/webhook-deliveries", response_model=list[WebhookDeliveryResponse])
 async def list_webhook_deliveries(limit: int = Query(default=20, ge=1, le=100), principal: TenantContext = Depends(OPS_ROLES)) -> list[WebhookDeliveryResponse]:
     return [WebhookDeliveryResponse(**item) for item in await engine.list_webhook_deliveries(principal, limit)]
@@ -443,9 +546,21 @@ async def monitoring_snapshot(principal: TenantContext = Depends(OPS_ROLES)) -> 
     return MonitoringSnapshotResponse(**repository.monitoring_snapshot(principal.tenant_id))
 
 
+@app.get("/v1/ops/security-posture", response_model=SecurityPostureResponse)
+async def security_posture(principal: TenantContext = Depends(verify_service_or_admin)) -> SecurityPostureResponse:
+    return SecurityPostureResponse(**get_settings().security_posture())
+
+
 @app.get("/v1/ops/security-audit", response_model=list[SecurityAuditEventResponse])
-async def security_audit(limit: int = Query(default=100, ge=1, le=200), principal: TenantContext = Depends(verify_service_or_admin)) -> list[SecurityAuditEventResponse]:
-    return [SecurityAuditEventResponse(**item) for item in repository.list_security_audit_events(principal.tenant_id, limit)]
+async def security_audit(limit: int = Query(default=100, ge=1, le=200), event_type: str | None = Query(default=None), actor_id: str | None = Query(default=None), principal: TenantContext = Depends(verify_service_or_admin)) -> list[SecurityAuditEventResponse]:
+    return [SecurityAuditEventResponse(**item) for item in repository.list_security_audit_events(principal.tenant_id, limit, event_type=event_type, actor_id=actor_id)]
+
+
+@app.get("/v1/ops/security-audit/export")
+async def export_security_audit(limit: int = Query(default=200, ge=1, le=1000), event_type: str | None = Query(default=None), actor_id: str | None = Query(default=None), principal: TenantContext = Depends(verify_service_or_admin)) -> FileResponse:
+    items = repository.list_security_audit_events(principal.tenant_id, limit, event_type=event_type, actor_id=actor_id)
+    output_path = write_security_audit_csv(principal.tenant_id, items)
+    return FileResponse(output_path, media_type="text/csv; charset=utf-8", filename=output_path.name)
 
 
 @app.get("/v1/ops/connectors", response_model=list[ConnectorResponse])
@@ -474,16 +589,54 @@ async def train_models(principal: TenantContext = Depends(verify_service_or_admi
     training_result = train_baseline_models()
     artifacts = {name: info["artifact_path"] for name, info in training_result.items()}
     metrics = {name: info["metrics"] for name, info in training_result.items()}
+    training_job_id = f"sync-train-{datetime.now(UTC).strftime('%Y%m%d%H%M%S')}"
     for name, info in training_result.items():
-        repository.save_model_version(principal.tenant_id, name, info["version_id"], info["artifact_path"], info["metrics"], stage="candidate", is_active=False)
-    repository.write_security_audit_event(principal.tenant_id, "models.trained.sync", principal.actor_id, principal.role, {"models": list(training_result)})
+        repository.save_model_version(
+            principal.tenant_id,
+            name,
+            info["version_id"],
+            info["artifact_path"],
+            info["metrics"],
+            stage="candidate",
+            is_active=False,
+            training_job_id=training_job_id,
+        )
+    project_root = Path(__file__).resolve().parents[2]
+    report_path = project_root / "MODEL_EVALUATION_SUMMARY.json"
+    evaluation_payload = {
+        "generated_at": datetime.now(UTC).isoformat(),
+        "training_manifest": {
+            "training_job_id": training_job_id,
+            "tenant_id": principal.tenant_id,
+            "mode": "sync",
+            "promote_stage": "candidate",
+            "activate_after_training": False,
+        },
+        "models": {
+            model_name: {
+                "version_id": info["version_id"],
+                "artifact_path": info["artifact_path"],
+                "metrics": info["metrics"],
+            }
+            for model_name, info in sorted(training_result.items())
+        },
+    }
+    report_path.write_text(json.dumps(evaluation_payload, indent=2), encoding="utf-8")
+    repository.write_security_audit_event(principal.tenant_id, "models.trained.sync", principal.actor_id, principal.role, {"models": list(training_result), "training_job_id": training_job_id})
     return TrainModelsResponse(status="ok", artifacts=artifacts, metrics=metrics)
 
 
 @app.post("/v1/dev/retraining-jobs", response_model=JobResponse)
 async def enqueue_retraining(req: RetrainRequest, principal: TenantContext = Depends(verify_service_or_admin)) -> JobResponse:
-    job = job_bus.enqueue_retraining(principal.tenant_id, principal.actor_id, req.promote_stage, req.activate_after_training)
-    repository.write_security_audit_event(principal.tenant_id, "models.retraining.enqueued", principal.actor_id, principal.role, {"job_id": job["job_id"], "promote_stage": req.promote_stage, "activate_after_training": req.activate_after_training})
+    job = job_bus.enqueue_retraining(
+        principal.tenant_id,
+        principal.actor_id,
+        req.promote_stage,
+        req.activate_after_training,
+        req.use_feedback_labels,
+        req.minimum_feedback_labels,
+    )
+    repository.write_security_audit_event(principal.tenant_id, "models.retraining.enqueued", principal.actor_id, principal.role, {"job_id": job["job_id"], "promote_stage": req.promote_stage, "activate_after_training": req.activate_after_training, "use_feedback_labels": req.use_feedback_labels, "minimum_feedback_labels": req.minimum_feedback_labels})
     return JobResponse(**job)
 
 
@@ -491,5 +644,10 @@ async def enqueue_retraining(req: RetrainRequest, principal: TenantContext = Dep
 async def seed_demo(principal: TenantContext = Depends(verify_service_or_admin)) -> SeedResponse:
     generated = await engine.seed_demo_data(principal)
     return SeedResponse(status="ok", generated_cases=generated)
+
+
+
+
+
 
 

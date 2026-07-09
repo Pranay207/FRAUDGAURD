@@ -117,7 +117,14 @@ cd C:\Users\Shiva\Downloads\FraudGaurd\backend
 python -m venv .venv
 .\.venv\Scripts\activate
 pip install -e .[dev]
+Copy-Item .env.example .env
 ```
+
+Before starting the API, replace the placeholder values in `backend/.env`:
+
+- `FRAUDGUARD_API_KEY`
+- `FRAUDGUARD_AUTH_SECRET`
+- `FRAUDGUARD_DATABASE_URL`
 
 ### 2. Start the API
 
@@ -134,6 +141,8 @@ cd C:\Users\Shiva\Downloads\FraudGaurd\backend
 Default API key:
 
 - `test_key`
+
+That default key is only for local development without `backend/.env`. Once `.env` exists, use the value you set in `FRAUDGUARD_API_KEY`.
 
 ## Verification
 
@@ -184,6 +193,26 @@ The current local build is wired around datasets placed under `backend/data/raw/
 ## Current State
 
 FraudGuard is a strong local MVP and engineering foundation. It is functional end-to-end for development, demos, and experimentation, but it is not yet a bank-grade production deployment.
+
+## Docker Setup
+
+Docker Compose expects a real `backend/.env` file now, not the checked-in placeholder example.
+
+```powershell
+cd C:\Users\Shiva\Downloads\FraudGaurd
+Copy-Item .\backend\.env.example .\backend\.env
+```
+
+Update at least these values before `docker compose up`:
+
+- `FRAUDGUARD_API_KEY`
+- `FRAUDGUARD_AUTH_SECRET`
+- `FRAUDGUARD_DATABASE_URL`
+- `POSTGRES_PASSWORD` in `docker-compose.yml` or your own override file
+
+After the stack is up, you can verify the runtime secret posture from:
+
+- `GET /v1/ops/security-posture`
 
 ## Recommended Next Steps
 

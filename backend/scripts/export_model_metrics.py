@@ -13,6 +13,10 @@ def main() -> None:
     report_path = project_root / "MODEL_EVALUATION_SUMMARY.json"
     payload = {
         "generated_at": datetime.now(UTC).isoformat(),
+        "training_manifest": {
+            "mode": "script_export",
+            "source": "backend/scripts/export_model_metrics.py",
+        },
         "models": {
             model_name: {
                 "version_id": info["version_id"],
