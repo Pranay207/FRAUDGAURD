@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FraudGuard Console</title>
-    <link rel="stylesheet" href="/dashboard/assets/styles.css" />
+    <link rel="stylesheet" href="/dashboard/assets/styles.css?v=20260710-2" />
   </head>
   <body>
     <div class="app-shell">
@@ -103,7 +103,7 @@
                   <option value="RESOLVED">Resolved</option>
                 </select>
                 <input id="caseSearch" placeholder="Search request or user" />
-                <input id="bulkAssignee" placeholder="Bulk assignee" />
+                <input id="bulkAssignee" list="analystDirectory" placeholder="Bulk assignee" />
                 <select id="bulkCaseStatus">
                   <option value="OPEN">Mark Open</option>
                   <option value="INVESTIGATING">Mark Investigating</option>
@@ -184,7 +184,9 @@
                   <option value="INVESTIGATING">Investigating</option>
                   <option value="RESOLVED">Resolved</option>
                 </select>
-                <input id="caseAssignee" placeholder="Assigned analyst" />
+                <input id="caseAssignee" list="analystDirectory" placeholder="Assigned analyst" />
+                <button id="assignMeBtn" type="button" class="ghost">Assign Me</button>
+                <button id="clearAssigneeBtn" type="button" class="ghost">Clear Owner</button>
                 <button id="saveStatusBtn" type="button">Save Case</button>
                 <button id="exportCaseBtn" type="button" class="ghost">Export Case</button>
               </div>
@@ -193,7 +195,10 @@
                 <pre id="detailPayload"></pre>
               </div>
               <div class="payload-block">
-                <p class="muted">Case Activity</p>
+                <div class="section-head compact">
+                  <p class="muted">Case Activity</p>
+                  <button id="exportActivityBtn" type="button" class="ghost small">Export Activity</button>
+                </div>
                 <div id="detailActivity" class="signal-list"></div>
               </div>
               <div class="payload-block">
@@ -271,6 +276,7 @@
                 <p class="eyebrow subtle">Challenger analysis</p>
                 <h3>Shadow Mode</h3>
               </div>
+              <button id="exportShadowBtn" class="ghost small">Export Drift CSV</button>
             </div>
             <div id="shadowSummary" class="signal-list"></div>
             <div class="section-head top-gap">
@@ -288,6 +294,7 @@
                 <p class="eyebrow subtle">Pilot readiness</p>
                 <h3>Pilot Report</h3>
               </div>
+              <button id="exportPilotReportBtn" class="ghost small">Export Report</button>
             </div>
             <div id="pilotReport" class="signal-list"></div>
           </article>
@@ -342,6 +349,17 @@
               </div>
               <button id="newKeyBtn" class="ghost small">Create API Key</button>
             </div>
+            <form id="analystCreateForm" class="compact-form admin-form hidden">
+              <input id="analystFullName" placeholder="Analyst full name" />
+              <input id="analystCreateEmail" placeholder="analyst@fraudguard.local" />
+              <input id="analystCreatePassword" type="password" placeholder="StrongPass!234" />
+              <select id="analystCreateRole">
+                <option value="analyst">Analyst</option>
+                <option value="viewer">Viewer</option>
+                <option value="admin">Admin</option>
+              </select>
+              <button id="createAnalystBtn" type="submit">Create Analyst</button>
+            </form>
             <div id="analysts" class="signal-list"></div>
             <div class="section-head top-gap">
               <div>
@@ -413,9 +431,11 @@
       </main>
     </div>
 
-    <script src="/dashboard/assets/app.js"></script>
+    <datalist id="analystDirectory"></datalist>
+    <script src="/dashboard/assets/app.js?v=20260710-2"></script>
   </body>
 </html>
+
 
 
 

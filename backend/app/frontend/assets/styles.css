@@ -1,4 +1,4 @@
-﻿:root {
+:root {
   --bg: #0a1620;
   --bg-accent: #0f2430;
   --panel: rgba(13, 25, 36, 0.82);
@@ -60,6 +60,78 @@ input, select {
   border: 1px solid var(--line);
   color: var(--ink);
   background: rgba(255,255,255,0.04);
+}
+
+.native-select-hidden {
+  display: none;
+}
+
+.custom-select {
+  position: relative;
+  min-width: 0;
+}
+
+.custom-select-trigger {
+  width: 100%;
+  text-align: left;
+  padding: 12px 44px 12px 14px;
+  border-radius: 14px;
+  border: 1px solid var(--line);
+  color: var(--ink);
+  background: #13222c;
+  box-shadow: none;
+  position: relative;
+}
+
+.custom-select-trigger::after {
+  content: '';
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  width: 8px;
+  height: 8px;
+  border-right: 2px solid rgba(237, 245, 251, 0.9);
+  border-bottom: 2px solid rgba(237, 245, 251, 0.9);
+  transform: translateY(-70%) rotate(45deg);
+}
+
+.custom-select.open .custom-select-trigger::after {
+  transform: translateY(-30%) rotate(225deg);
+}
+
+.custom-select-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 8px);
+  display: none;
+  z-index: 50;
+  padding: 8px;
+  border-radius: 16px;
+  border: 1px solid var(--line-strong);
+  background: #13222c;
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.38);
+}
+
+.custom-select.open .custom-select-menu {
+  display: grid;
+  gap: 4px;
+}
+
+.custom-select-option {
+  width: 100%;
+  text-align: left;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  box-shadow: none;
+}
+
+.custom-select-option:hover,
+.custom-select-option.active {
+  background: rgba(255,255,255,0.08);
 }
 
 input::placeholder { color: rgba(237, 245, 251, 0.38); }
@@ -323,11 +395,106 @@ h1 { font-size: 34px; line-height: 1.02; }
   flex-wrap: wrap;
 }
 
+.signal-stack {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.kpi-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.kpi-chip,
+.pilot-stat-card,
+.shadow-route-card,
+.detail-callout {
+  padding: 14px;
+  border-radius: 16px;
+  border: 1px solid var(--line);
+  background: rgba(255,255,255,0.04);
+}
+
+.kpi-chip {
+  display: grid;
+  gap: 4px;
+}
+
+.kpi-chip span,
+.pilot-stat-card span {
+  font-size: 12px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.kpi-chip strong,
+.pilot-stat-card strong {
+  font-size: 24px;
+  color: var(--ink);
+}
+
+.kpi-chip.warn {
+  border-color: rgba(239, 180, 73, 0.26);
+  background: rgba(239, 180, 73, 0.08);
+}
+
+.kpi-chip.good {
+  border-color: rgba(76, 208, 139, 0.26);
+  background: rgba(76, 208, 139, 0.08);
+}
+
+.shadow-route-grid,
+.pilot-stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 10px;
+}
+
+.shadow-route-top {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.shadow-drift-card {
+  align-items: start;
+}
+
+.detail-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pilot-note {
+  align-items: start;
+}
+
+.admin-form {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: end;
+}
+
+.admin-form button {
+  grid-column: span 2;
+}
+
+.analyst-card .actions {
+  align-items: center;
+}
+
+.analyst-card .badge {
+  white-space: nowrap;
+}
 .detail.hidden, .hidden { display: none; }
 .detail { display: grid; gap: 16px; }
-.detail-top, .detail-grid { display: grid; gap: 16px; }
+.detail-top, .detail-grid { display: grid; gap: 16px; }`r`n.detail-top { grid-template-columns: 1fr auto; align-items: start; }
 .detail-grid { grid-template-columns: 1fr 1fr; }
-.ops-row { display: grid; grid-template-columns: 200px 1fr 160px; gap: 12px; }
+.ops-row { display: grid; grid-template-columns: 160px minmax(0, 1fr) auto auto auto auto; gap: 12px; align-items: center; }
 .feedback-form { grid-template-columns: 220px 1fr 160px; }
 .payload-block pre {
   margin: 0;
